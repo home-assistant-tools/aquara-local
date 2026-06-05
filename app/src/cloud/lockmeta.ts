@@ -84,7 +84,7 @@ export function buildUserValidRange(userId: number, opts: { deadline: number | n
   return bytesToHex(b);
 }
 
-const REPEAT_LBL: Record<number, string> = { 0: "Một lần", 1: "Hàng ngày", 2: "Hàng tuần", 3: "Hàng tháng", 4: "Khoảng cố định" };
+const REPEAT_LBL: Record<number, string> = { 0: "Once", 1: "Daily", 2: "Weekly", 3: "Monthly", 4: "Fixed range" };
 function u32le(b: Uint8Array, o: number): number { return (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0; }
 function p2(n: number): string { return String(n).padStart(2, "0"); }
 function fmtDateTime(s: number): string { const d = new Date(s * 1000); return `${p2(d.getDate())}/${p2(d.getMonth() + 1)}/${d.getFullYear()} ${p2(d.getHours())}:${p2(d.getMinutes())}`; }
@@ -93,7 +93,7 @@ function fmtHm(s: number): string { const d = new Date(s * 1000); return `${p2(d
 /** Giải mã ĐẦY ĐỦ hiệu lực của credential để hiển thị. */
 export function validityInfo(c: Credential): { hasRange: boolean; disabled: boolean; lines: string[] } {
   if (!c.validRange || c.validRange.length < 38) {
-    return { hasRange: false, disabled: false, lines: ["Hiệu lực: Vĩnh viễn (không giới hạn thời gian)"] };
+    return { hasRange: false, disabled: false, lines: ["Validity: Permanent (no time limit)"] };
   }
   const b = hexToBytes(c.validRange);
   const repeat = b[2];
@@ -104,27 +104,27 @@ export function validityInfo(c: Credential): { hasRange: boolean; disabled: bool
   return {
     hasRange: true, disabled,
     lines: [
-      `Trạng thái: ${disabled ? "⛔ Vô hiệu hoá (đã hết hạn)" : "✅ Đang hiệu lực"}`,
-      `Hiệu lực đến: ${deadline == null ? "Vĩnh viễn" : fmtDateTime(deadline)}`,
-      `Khung giờ trong ngày: ${fmtHm(start)} – ${fmtHm(end)}`,
-      `Lặp lại: ${REPEAT_LBL[repeat] ?? `mã ${repeat}`}`,
-      `Slot khoá (userId): ${(b[0] | (b[1] << 8))}`,
+      `Status: ${disabled ? "⛔ Disabled (expired)" : "✅ Active"}`,
+      `Valid until: ${deadline == null ? "Permanent" : fmtDateTime(deadline)}`,
+      `Daily time window: ${fmtHm(start)} – ${fmtHm(end)}`,
+      `Repeat: ${REPEAT_LBL[repeat] ?? `code ${repeat}`}`,
+      `Lock slot (userId): ${(b[0] | (b[1] << 8))}`,
     ],
   };
 }
 
 export const CRED_TYPE: Record<number, { label: string; icon: string }> = {
-  1: { label: "Vân tay", icon: "🫆" },
-  2: { label: "Mật khẩu", icon: "🔢" },
-  3: { label: "Thẻ NFC", icon: "💳" },
+  1: { label: "Fingerprint", icon: "🫆" },
+  2: { label: "Password", icon: "🔢" },
+  3: { label: "NFC card", icon: "💳" },
   4: { label: "eKey / Bluetooth", icon: "📲" },
-  5: { label: "Mật khẩu tạm", icon: "⏱️" },
-  6: { label: "Khuôn mặt", icon: "🙂" },
+  5: { label: "Temp password", icon: "⏱️" },
+  6: { label: "Face", icon: "🙂" },
   7: { label: "NFC Tag", icon: "🏷️" },
 };
 
 export function credTypeLabel(type: number): string {
-  return CRED_TYPE[type]?.label ?? `Loại ${type}`;
+  return CRED_TYPE[type]?.label ?? `Type ${type}`;
 }
 export function credTypeIcon(type: number): string {
   return CRED_TYPE[type]?.icon ?? "🔑";
@@ -133,8 +133,8 @@ export function credTypeIcon(type: number): string {
 /** validRange (hex) → có giới hạn hiệu lực hay không + mô tả thô. */
 export function validRangeLabel(c: Credential): string | null {
   if (!c.validRange || /^0*$/.test(c.validRange)) return null;
-  // Có validRange = lịch/giới hạn. Giải thô: nếu toàn ff ở phần thời gian ⇒ vĩnh viễn theo lịch.
-  return "Có lịch / giới hạn hiệu lực";
+  // Has validRange = a schedule/limit. Rough decode: all-ff in the time part ⇒ permanent schedule.
+  return "Has schedule / validity limit";
 }
 
 /** Gom credential theo nhóm người dùng. */
@@ -142,7 +142,7 @@ export function groupCredentials(creds: Credential[]): { groupId: string; groupN
   const map = new Map<string, { groupId: string; groupName: string; items: Credential[] }>();
   for (const c of creds) {
     const id = c.typeGroupId ?? "?";
-    if (!map.has(id)) map.set(id, { groupId: id, groupName: c.typeGroupName ?? `Nhóm ${id}`, items: [] });
+    if (!map.has(id)) map.set(id, { groupId: id, groupName: c.typeGroupName ?? `Group ${id}`, items: [] });
     map.get(id)!.items.push(c);
   }
   return [...map.values()];
@@ -157,12 +157,12 @@ export function resourceMap(res: LockResource[]): Record<string, string> {
 export function lockStateLabel(v?: string): string {
   // Aqara lock_state (D100): quan sát 4 ≈ đã khóa/đóng, 6 sau BLE unlock thành công.
   switch (v) {
-    case "0": return "Mở chốt";
-    case "6": return "Đã mở";
-    case "1": return "Đã khóa";
-    case "2": return "Lỗi";
-    case "4": return "Đã khóa";
-    default: return v ? `Mã ${v}` : "—";
+    case "0": return "Unlatched";
+    case "6": return "Unlocked";
+    case "1": return "Locked";
+    case "2": return "Error";
+    case "4": return "Locked";
+    default: return v ? `Code ${v}` : "—";
   }
 }
 
@@ -172,28 +172,28 @@ export function lockStateLabel(v?: string): string {
 export function logSourceLabel(e: LockLogEntry): string {
   const head = (e.source ?? "").split(",")[0];
   const SRC: Record<string, string> = {
-    "10": "Mở bằng vân tay/mật khẩu",
-    "46": "Mở từ xa / app",
-    "11": "Mở bằng NFC",
-    "12": "Mở bằng chìa",
+    "10": "Opened by fingerprint/password",
+    "46": "Remote / app unlock",
+    "11": "Opened by NFC",
+    "12": "Opened by key",
   };
-  return SRC[head] ?? (head ? `Sự kiện ${head}` : "Sự kiện khóa");
+  return SRC[head] ?? (head ? `Event ${head}` : "Lock event");
 }
 
 /** Tóm tắt hiệu lực của 1 USER (lấy từ credential đại diện — chúng dùng chung validRange). */
 export function userValidityText(items: Credential[]): { text: string; disabled: boolean; hasRange: boolean } {
   const c = items.find((x) => x.validRange && x.validRange.length >= 38);
-  if (!c) return { text: "Vĩnh viễn (không giới hạn)", disabled: false, hasRange: false };
+  if (!c) return { text: "Permanent (no limit)", disabled: false, hasRange: false };
   const b = hexToBytes(c.validRange!);
   const start = u32le(b, 3), end = u32le(b, 7);
   const dlHex = c.validRange!.slice(22, 30).toLowerCase();
   const deadline = dlHex === "ffffffff" ? null : u32le(b, 11);
   const disabled = deadline != null && deadline * 1000 < Date.now();
   const win = `${fmtHm(start)}–${fmtHm(end)}`;
-  const winPart = win === "00:00–23:59" ? "" : ` · trong ngày ${win}`;
-  if (disabled) return { text: `⛔ Vô hiệu (hết hạn ${fmtDateTime(deadline!)})`, disabled: true, hasRange: true };
-  if (deadline == null) return { text: `✅ Vĩnh viễn${winPart}`, disabled: false, hasRange: true };
-  return { text: `✅ Hiệu lực đến ${fmtDateTime(deadline)}${winPart}`, disabled: false, hasRange: true };
+  const winPart = win === "00:00–23:59" ? "" : ` · daily ${win}`;
+  if (disabled) return { text: `⛔ Disabled (expired ${fmtDateTime(deadline!)})`, disabled: true, hasRange: true };
+  if (deadline == null) return { text: `✅ Permanent${winPart}`, disabled: false, hasRange: true };
+  return { text: `✅ Valid until ${fmtDateTime(deadline)}${winPart}`, disabled: false, hasRange: true };
 }
 
 /** Đọc hiệu lực HIỆN TẠI của 1 USER để PRE-FILL form sửa.
@@ -231,18 +231,18 @@ export function decodeUnlockLog(e: LockLogEntry, uidMap: Record<number, { who: s
   const src = (e.source || "").split(",")[0];
   let b: Uint8Array; try { b = hexToBytes(v); } catch { b = new Uint8Array(); }
   if (v.startsWith("0b0009") && b.length >= 8) {
-    if (b[3] === 0x20) { // mở bằng credential tại khoá
+    if (b[3] === 0x20) { // opened by a credential at the lock
       const uid = b[4] | (b[5] << 8);
       const u = uidMap[uid];
-      if (u) return { icon: credTypeIcon(u.type), method: `Mở bằng ${credTypeLabel(u.type).toLowerCase()}`, who: u.who };
-      return { icon: "🔓", method: "Mở khoá", who: `slot ${uid}` };
+      if (u) return { icon: credTypeIcon(u.type), method: `Opened by ${credTypeLabel(u.type).toLowerCase()}`, who: u.who };
+      return { icon: "🔓", method: "Unlocked", who: `slot ${uid}` };
     }
-    if (b[3] === 0xb1 || b[3] === 0x00) return { icon: "🔒", method: "Tự động khoá", who: "" };
+    if (b[3] === 0xb1 || b[3] === 0x00) return { icon: "🔒", method: "Auto-lock", who: "" };
   }
-  if (src === "46") return { icon: "📲", method: "Mở từ xa (app)", who: "" };
-  if (src === "11") return { icon: "💳", method: "Mở bằng thẻ NFC", who: "" };
-  if (src === "12") return { icon: "🗝️", method: "Mở bằng chìa", who: "" };
-  return { icon: "🔓", method: "Sự kiện khoá", who: "" };
+  if (src === "46") return { icon: "📲", method: "Remote unlock (app)", who: "" };
+  if (src === "11") return { icon: "💳", method: "Opened by NFC card", who: "" };
+  if (src === "12") return { icon: "🗝️", method: "Opened by key", who: "" };
+  return { icon: "🔓", method: "Lock event", who: "" };
 }
 
 export function fmtTime(ms: number): string {

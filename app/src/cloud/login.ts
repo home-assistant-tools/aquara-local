@@ -42,7 +42,7 @@ function modpow(base: bigint, exp: bigint, mod: bigint): bigint {
 
 /** RSA/ECB/PKCS1Padding (type 2) encrypt — trả 128 byte. */
 function rsaPkcs1Encrypt(msg: Uint8Array): Uint8Array {
-  if (msg.length > RSA_K - 11) throw new Error("RSA: message quá dài");
+  if (msg.length > RSA_K - 11) throw new Error("RSA: message too long");
   const psLen = RSA_K - 3 - msg.length;
   const ps = new Uint8Array(psLen);
   (global as any).crypto.getRandomValues(ps);
@@ -96,7 +96,7 @@ export async function loginWithPassword(email: string, password: string, area = 
   const r = await fetch(host + PATH, { method: "POST", headers, body });
   const text = await r.text();
   let j: any;
-  try { j = JSON.parse(text); } catch { throw new Error("login: phản hồi không phải JSON: " + text.slice(0, 120)); }
+  try { j = JSON.parse(text); } catch { throw new Error("login: non-JSON response: " + text.slice(0, 120)); }
   if (j.code !== 0 || !j.result?.token) {
     throw new Error(`login thất bại (code=${j.code}): ${j.message ?? text.slice(0, 120)}`);
   }

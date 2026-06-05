@@ -13,7 +13,7 @@ export class BlePlxClient {
   /** Quét tìm khoá MiOT (advertise name "DP1A"). Trả Device. */
   scanLock(timeoutMs = 8000, nameMatch = /^dp1a$/i): Promise<Device> {
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.mgr.stopDeviceScan(); reject(new Error("scan timeout — khoá có quảng bá?")); }, timeoutMs);
+      const timer = setTimeout(() => { this.mgr.stopDeviceScan(); reject(new Error("scan timeout — is the lock advertising?")); }, timeoutMs);
       this.mgr.startDeviceScan(null, { scanMode: ScanMode.LowLatency }, (err, d) => {
         if (err) { clearTimeout(timer); this.mgr.stopDeviceScan(); reject(err); return; }
         if (d && (nameMatch.test(d.name ?? "") || nameMatch.test(d.localName ?? ""))) {
@@ -35,31 +35,31 @@ export class BlePlxClient {
     for (let i = 1; i <= maxTries; i++) {
       try {
         const dev = await this.scanLock(6000);
-        log?.(`connect lần ${i}/${maxTries} (${dev.id})…`);
+        log?.(`connect attempt ${i}/${maxTries} (${dev.id})…`);
         this.dev = await dev.connect({ requestMTU: 200 });
         await this.dev.discoverAllServicesAndCharacteristics();
         log?.(`connected ✓`);
         return;
       } catch (e: any) {
         lastErr = e;
-        log?.(`lần ${i} fail (${String(e?.message ?? e).slice(0, 40)}) — thử lại…`);
+        log?.(`attempt ${i} failed (${String(e?.message ?? e).slice(0, 40)}) — retrying…`);
         try { await this.disconnect(); } catch { /**/ }
         await new Promise((r) => setTimeout(r, 700));
       }
     }
-    throw new Error("connect khoá thất bại sau " + maxTries + " lần (133): " + String(lastErr?.message ?? lastErr));
+    throw new Error("failed to connect to the lock after " + maxTries + " attempts (133): " + String(lastErr?.message ?? lastErr));
   }
 
   /** Tìm Characteristic theo UUID char trong MỌI service (khỏi cần đúng UUID service). */
   private async findChar(chr: string) {
-    if (!this.dev) throw new Error("chưa connect");
+    if (!this.dev) throw new Error("not connected");
     const services = await this.dev.services();
     for (const s of services) {
       const chars = await s.characteristics();
       const c = chars.find((x) => x.uuid.toLowerCase() === chr.toLowerCase());
       if (c) return c;
     }
-    throw new Error("char không thấy: " + chr);
+    throw new Error("characteristic not found: " + chr);
   }
 
   async write(_svc: string, chr: string, data: Uint8Array, withResponse = true): Promise<void> {

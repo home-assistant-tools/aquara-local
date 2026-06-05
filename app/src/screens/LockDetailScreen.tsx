@@ -49,18 +49,18 @@ export default function LockDetailScreen({
   const [groupSheet, setGroupSheet] = useState<{ groupId: string; groupName: string; items: Credential[]; typeGroup: string } | null>(null);
   const [renameTarget, setRenameTarget] = useState<Credential | null>(null);
   const [renameText, setRenameText] = useState("");
-  // tạo mật khẩu: nếu có groupId → thêm vào user sẵn; null fields → tạo user mới
+  // create password: with groupId → add to existing user; null fields → create a new user
   const [pwdModal, setPwdModal] = useState<{ groupId?: string; groupName?: string; typeGroup?: string } | null>(null);
   const [pwdDigits, setPwdDigits] = useState("");
   const [pwdName, setPwdName] = useState("");
   const [userModal, setUserModal] = useState(false);
   const [userName, setUserName] = useState("");
-  // cài hiệu lực theo user
+  // set validity per user
   const [validityModal, setValidityModal] = useState<{ groupId: string; groupName: string; items: Credential[] } | null>(null);
   const [vDeadline, setVDeadline] = useState<"forever" | "past" | "1" | "7" | "30" | "custom">("forever");
   const [vCustomDays, setVCustomDays] = useState("3");
   const [vAllDay, setVAllDay] = useState(true);
-  const [vStartMin, setVStartMin] = useState(0);        // phút trong ngày 0..1439
+  const [vStartMin, setVStartMin] = useState(0);        // minute of day 0..1439
   const [vEndMin, setVEndMin] = useState(23 * 60 + 59);
   const [showStartPicker, setShowStartPicker] = useState(false);
   const [showEndPicker, setShowEndPicker] = useState(false);
@@ -89,12 +89,13 @@ export default function LockDetailScreen({
     setSessionLoading(true);
     setSessionReady(false);
     setSessionError("");
-    setStatus("Cloud + BLE: chuẩn bị kết nối session…");
-    ctrl.connectSession(lock.did, (m) => { if (alive) setStatus(m); }, true)
+    setStatus("Cloud + BLE: preparing session…");
+    // forceFresh=false → reuse a cached session if the lock returns the same public key (no cloud call).
+    ctrl.connectSession(lock.did, (m) => { if (alive) setStatus(m); }, false)
       .then(() => {
         if (!alive) return;
         setSessionReady(true);
-        setStatus("BLE session sẵn sàng");
+        setStatus("BLE session ready");
       })
       .catch((e: any) => {
         if (!alive) return;
@@ -111,11 +112,11 @@ export default function LockDetailScreen({
 
   function controller(): LockController {
     const ctrl = ctrlRef.current;
-    if (!ctrl || !sessionReady) throw new Error("BLE session chưa sẵn sàng");
+    if (!ctrl || !sessionReady) throw new Error("BLE session not ready");
     return ctrl;
   }
 
-  // Nút back cứng: đóng modal/sheet đang mở trước, nếu không thì quay lại danh sách khoá.
+  // Hardware back: close any open modal/sheet first, otherwise go back to the lock list.
   useEffect(() => {
     const sub = BackHandler.addEventListener("hardwareBackPress", () => {
       if (renameTarget) { setRenameTarget(null); return true; }
@@ -130,10 +131,10 @@ export default function LockDetailScreen({
     return () => sub.remove();
   }, [renameTarget, renameUserTarget, validityModal, pwdModal, userModal, credSheet, groupSheet, onBack]);
 
-  // MỞ KHOÁ — ưu tiên BLE (nếu session sẵn sàng), fallback CLOUD khi BLE chưa kết nối / lỗi.
+  // UNLOCK — prefer BLE (if session ready), fall back to CLOUD when BLE isn't connected / fails.
   async function unlock() {
     const ctrl = ctrlRef.current;
-    if (!ctrl) { Alert.alert("Mở khoá", "Chưa khởi tạo được bộ điều khiển."); return; }
+    if (!ctrl) { Alert.alert("Unlock", "Controller not initialized."); return; }
     setUnlocking(true); setStatus("");
     try {
       let result: UnlockResult;
@@ -141,24 +142,24 @@ export default function LockDetailScreen({
         try {
           result = await ctrl.unlock(lock.did, (m) => setStatus(m));
         } catch (bleErr: any) {
-          setStatus("BLE lỗi → chuyển sang mở qua cloud…");
+          setStatus("BLE error → unlocking via cloud…");
           result = await ctrl.cloudUnlock(lock.did, (m) => setStatus(m));
         }
       } else {
-        // BLE chưa kết nối kịp → mở thẳng qua cloud
+        // BLE not connected yet → unlock straight via cloud
         result = await ctrl.cloudUnlock(lock.did, (m) => setStatus(m));
       }
       if (result.status?.opened != null) {
         setRes((prev) => ({ ...prev, lock_state: result.status!.lockState ?? (result.status!.opened ? "0" : "4") }));
       }
-      Alert.alert("Mở khoá", unlockResultMessage(result));
+      Alert.alert("Unlock", unlockResultMessage(result));
     } catch (e: any) {
       const msg = String(e?.message ?? e);
       if (msg.includes("CLOUD_UNLOCK_NOT_CAPTURED")) {
-        Alert.alert("Mở khoá qua cloud chưa sẵn sàng",
-          "Đường mở khoá từ xa qua cloud đang hoàn thiện (chờ bắt API). Hãy lại gần khoá để mở bằng Bluetooth.");
+        Alert.alert("Cloud unlock not ready",
+          "Remote cloud unlock is still being finalized (capture pending). Move closer to unlock via Bluetooth.");
       } else {
-        Alert.alert("Mở khoá thất bại", msg);
+        Alert.alert("Unlock failed", msg);
       }
     } finally { setUnlocking(false); }
   }
@@ -166,61 +167,71 @@ export default function LockDetailScreen({
   async function runWrite(label: string, fn: () => Promise<any>) {
     setBusy(true);
     try { await fn(); await load(); }
-    catch (e: any) { Alert.alert(label + " thất bại", String(e?.message ?? e)); }
+    catch (e: any) { Alert.alert(label + " failed", String(e?.message ?? e)); }
     finally { setBusy(false); }
   }
   function openCredActions(c: Credential) { setCredSheet(c); }
-  // Set hiệu lực qua BLE 03/21 (đường THẬT chạm firmware) + cập nhật cloud mirror để hiển thị đồng bộ.
-  async function runBleValidity(label: string, items: { cred: Credential; vrHex: string }[]) {
+  // Set validity. With BLE ready → firmware 03/21 (the real path) + cloud mirror. Without BLE →
+  // cloud-only (applies when the hub syncs to the lock).
+  async function runValidity(label: string, items: { cred: Credential; vrHex: string }[]) {
     setBusy(true); setStatus("");
     try {
-      const res = await controller().setValidity(lock.did, items.map((i) => i.vrHex), (m) => setStatus(m));
-      for (const it of items) { try { await cloud.setCredentialValidRange(lock.did, it.cred, it.vrHex); } catch { /* mirror best-effort */ } }
-      await load();
-      Alert.alert(label, res.ack > 0
-        ? `Khoá xác nhận ${res.ack}/${res.total} (firmware ack 00) ✅`
-        : "Đã gửi lệnh nhưng chưa nhận ack từ khoá — thử lại / kiểm tra tại cửa.");
+      if (bleReady) {
+        const r = await controller().setValidity(lock.did, items.map((i) => i.vrHex), (m) => setStatus(m));
+        for (const it of items) { try { await cloud.setCredentialValidRange(lock.did, it.cred, it.vrHex); } catch { /* mirror best-effort */ } }
+        await load();
+        Alert.alert(label, r.ack > 0
+          ? `Lock acknowledged ${r.ack}/${r.total} (firmware ack 00) ✅`
+          : "Command sent but no ack from the lock — retry / check at the door.");
+      } else {
+        let ok = 0;
+        for (const it of items) { try { await cloud.setCredentialValidRange(lock.did, it.cred, it.vrHex); ok++; } catch { /* ignore */ } }
+        await load();
+        Alert.alert(label, ok > 0
+          ? `Updated ${ok}/${items.length} via cloud (no BLE). Applies once the hub syncs to the lock.`
+          : "Cloud update failed.");
+      }
     } catch (e: any) {
-      Alert.alert(label + " thất bại", String(e?.message ?? e));
+      Alert.alert(label + " failed", String(e?.message ?? e));
     } finally { setBusy(false); setStatus(""); }
   }
   function doDelete(c: Credential) {
     setCredSheet(null);
-    Alert.alert("Xoá credential?",
-      `Xoá "${c.typeName}"? Không khôi phục được (vân tay/mật khẩu phải đăng ký lại tại khoá).`,
-      [{ text: "Huỷ", style: "cancel" }, { text: "Xoá", style: "destructive", onPress: () => runWrite("Xoá", () => cloud.deleteCredential(lock.did, c)) }]);
+    Alert.alert("Delete credential?",
+      `Delete "${c.typeName}"? This cannot be undone (fingerprint/password must be re-enrolled at the lock).`,
+      [{ text: "Cancel", style: "cancel" }, { text: "Delete", style: "destructive", onPress: () => runWrite("Delete", () => cloud.deleteCredential(lock.did, c)) }]);
   }
   async function submitRename() {
     const c = renameTarget; const name = renameText.trim();
     setRenameTarget(null);
     if (!c || !name || name === c.typeName) return;
-    await runWrite("Đổi tên", () => cloud.updateCredential(lock.did, c, { typeName: name }));
+    await runWrite("Rename", () => cloud.updateCredential(lock.did, c, { typeName: name }));
   }
-  // TẠO MẬT KHẨU (firmware BLE 02/13 + cloud). Tạo user mới nếu pwdModal không có groupId.
+  // CREATE PASSWORD (firmware BLE 02/13 + cloud). Creates a new user if pwdModal has no groupId.
   async function submitCreatePassword() {
-    const m = pwdModal; const digits = pwdDigits.trim(); const name = pwdName.trim() || "Mật khẩu";
+    const m = pwdModal; const digits = pwdDigits.trim(); const name = pwdName.trim() || "Password";
     if (!m) return;
-    if (!/^\d{6,10}$/.test(digits)) { Alert.alert("Mật khẩu không hợp lệ", "Nhập 6–10 chữ số."); return; }
+    if (!/^\d{6,10}$/.test(digits)) { Alert.alert("Invalid password", "Enter 6–10 digits."); return; }
     setPwdModal(null); setBusy(true); setStatus("");
     try {
       let groupId = m.groupId; const typeGroup = m.typeGroup ?? "3";
       if (!groupId) {
         groupId = AqaraCloud.nextFreeGroupId(groups.map((g) => g.typeGroupId));
-        setStatus("Cloud: tạo user mới…");
-        await cloud.createUserGroup(lock.did, groupId, `Người dùng ${groupId}`, "3");
+        setStatus("Cloud: creating new user…");
+        await cloud.createUserGroup(lock.did, groupId, `User ${groupId}`, "3");
       }
-      const r = await controller().createPassword(lock.did, parseInt(groupId, 10), digits, parseInt(typeGroup, 10), (s) => setStatus(s));
-      setStatus("Cloud: lưu metadata…");
+      const r = await controller().createPassword(lock.did, parseInt(groupId, 10), digits, parseInt(typeGroup, 10), (st) => setStatus(st));
+      setStatus("Cloud: saving metadata…");
       await cloud.addCredentialMeta(lock.did, {
         typeGroupId: groupId, typeName: name, typeLevel: typeGroup,
         validRange: permanentValidRangeForUserId(r.userId), typeValue: typeValueFor(2, r.userId), type: "2",
       });
       await load();
-      Alert.alert("Tạo mật khẩu", `✅ Đã tạo "${name}" (slot ${r.userId})${r.ackValidity ? " — khoá xác nhận" : ""}.\nMã: ${digits}`);
-    } catch (e: any) { Alert.alert("Tạo mật khẩu thất bại", String(e?.message ?? e)); }
+      Alert.alert("Create password", `✅ Created "${name}" (slot ${r.userId})${r.ackValidity ? " — lock acknowledged" : ""}.\nCode: ${digits}`);
+    } catch (e: any) { Alert.alert("Create password failed", String(e?.message ?? e)); }
     finally { setBusy(false); setStatus(""); }
   }
-  // TẠO USER TRỐNG (cloud group/add).
+  // CREATE EMPTY USER (cloud group/add).
   async function submitCreateUser() {
     const name = userName.trim(); setUserModal(false);
     if (!name) return;
@@ -229,17 +240,17 @@ export default function LockDetailScreen({
       const gid = AqaraCloud.nextFreeGroupId(groups.map((g) => g.typeGroupId));
       await cloud.createUserGroup(lock.did, gid, name, "2");
       await load();
-      Alert.alert("Tạo user", `✅ Đã tạo user "${name}". Thêm vân tay/mật khẩu sau.`);
-    } catch (e: any) { Alert.alert("Tạo user thất bại", String(e?.message ?? e)); }
+      Alert.alert("Create user", `✅ Created user "${name}". Add a fingerprint/password later.`);
+    } catch (e: any) { Alert.alert("Create user failed", String(e?.message ?? e)); }
     finally { setBusy(false); }
   }
-  // Vô hiệu / kích hoạt TOÀN BỘ credential của 1 user (nhóm) — lặp tuần tự từng cái.
+  // Disable / enable ALL credentials of one user (group) — sequentially.
   function doGroupToggle(items: Credential[], disable: boolean) {
     setGroupSheet(null);
     const list = items.map((c) => ({ cred: c, vrHex: disable ? disabledValidRange(c) : enabledValidRange(c) }));
-    runBleValidity(disable ? "Vô hiệu cả user (BLE)" : "Kích hoạt cả user (BLE)", list);
+    runValidity(disable ? "Disable whole user" : "Enable whole user", list);
   }
-  // CÀI THỜI GIAN HIỆU LỰC theo USER → áp cùng validRange cho mọi credential.
+  // SET VALIDITY per USER → apply the same validRange to every credential.
   async function submitUserValidity() {
     const m = validityModal; if (!m) return;
     const nowS = Math.floor(Date.now() / 1000);
@@ -248,51 +259,56 @@ export default function LockDetailScreen({
     else if (vDeadline === "past") deadline = nowS - 86400;
     else if (vDeadline === "custom") {
       const days = parseInt(vCustomDays, 10);
-      if (!Number.isFinite(days) || days < 1) { Alert.alert("Số ngày không hợp lệ", "Nhập số ngày ≥ 1."); return; }
+      if (!Number.isFinite(days) || days < 1) { Alert.alert("Invalid number of days", "Enter days ≥ 1."); return; }
       deadline = nowS + days * 86400;
     } else deadline = nowS + parseInt(vDeadline, 10) * 86400;
     const sMin = vAllDay ? 0 : vStartMin;
     const eMin = vAllDay ? 23 * 60 + 59 : vEndMin;
-    if (!vAllDay && eMin <= sMin) { Alert.alert("Khung giờ không hợp lệ", "Giờ kết thúc phải sau giờ bắt đầu."); return; }
+    if (!vAllDay && eMin <= sMin) { Alert.alert("Invalid time window", "End time must be after start time."); return; }
     const items = m.items.filter((c) => c.typeValue);
     setValidityModal(null);
-    if (!items.length) { Alert.alert("User chưa có phương thức", "Thêm mật khẩu/vân tay trước khi cài hiệu lực."); return; }
+    if (!items.length) { Alert.alert("User has no method", "Add a password/fingerprint before setting validity."); return; }
     const list = items.map((c) => ({ cred: c, vrHex: buildUserValidRange(credUserId(c), { deadline, startMin: sMin, endMin: eMin }) }));
-    await runBleValidity("Cài hiệu lực user (BLE)", list);
+    await runValidity("Set user validity", list);
   }
   function doDeleteUser(group: { groupId: string; groupName: string }) {
     setGroupSheet(null);
-    Alert.alert("Xoá user?", `Xoá "${group.groupName}" cùng MỌI vân tay/mật khẩu/thẻ? Không khôi phục được.`,
-      [{ text: "Huỷ", style: "cancel" }, { text: "Xoá", style: "destructive", onPress: async () => {
+    Alert.alert("Delete user?", `Delete "${group.groupName}" with ALL its fingerprints/passwords/cards? This cannot be undone.`,
+      [{ text: "Cancel", style: "cancel" }, { text: "Delete", style: "destructive", onPress: async () => {
         setBusy(true); setStatus("");
         try {
-          await controller().deleteUserGroup(lock.did, parseInt(group.groupId, 10), (s) => setStatus(s));
-          try { await cloud.deleteUserGroupCloud(lock.did, group.groupId); } catch { /* mirror */ }
+          if (bleReady) {
+            await controller().deleteUserGroup(lock.did, parseInt(group.groupId, 10), (st) => setStatus(st));
+            try { await cloud.deleteUserGroupCloud(lock.did, group.groupId); } catch { /* mirror */ }
+          } else {
+            await cloud.deleteUserGroupCloud(lock.did, group.groupId);
+          }
           await load();
-          Alert.alert("Xoá user", "Đã xoá ✅");
-        } catch (e: any) { Alert.alert("Xoá user thất bại", String(e?.message ?? e)); }
+          Alert.alert("Delete user", "Deleted ✅");
+        } catch (e: any) { Alert.alert("Delete user failed", String(e?.message ?? e)); }
         finally { setBusy(false); setStatus(""); }
       } }]);
   }
   async function submitRenameUser() {
-    const t = renameUserTarget; const name = renameUserText.trim();
+    const tg = renameUserTarget; const name = renameUserText.trim();
     setRenameUserTarget(null);
-    if (!t || !name || name === t.groupName) return;
-    await runWrite("Đổi tên user", () => cloud.renameUserGroup(lock.did, t.groupId, name, t.typeGroup));
+    if (!tg || !name || name === tg.groupName) return;
+    await runWrite("Rename user", () => cloud.renameUserGroup(lock.did, tg.groupId, name, tg.typeGroup));
   }
   function doEnrollPlaceholder(kind: string) {
     setGroupSheet(null);
-    Alert.alert(`Thêm ${kind}`, `Cần luồng enroll TƯƠNG TÁC (kích hoạt → ${kind === "vân tay" ? "quẹt ngón" : "chạm thẻ"} tại khoá nhiều lần). Protocol đang được bắt — sẽ bật khi xong.`);
+    Alert.alert(`Add ${kind}`, `Needs an INTERACTIVE enroll flow (activate → ${kind === "fingerprint" ? "swipe finger" : "tap card"} at the lock several times). Protocol capture in progress — will enable when done.`);
   }
 
   const batt = res.batt_0_remain_percentage;
-  // Kết nối tới khoá qua BLE: offline khi đang kết nối / lỗi, online khi session sẵn sàng.
+  // BLE connection to the lock: offline while connecting / on error, online when session ready.
   const connState: "connecting" | "online" | "error" = sessionReady ? "online" : sessionLoading ? "connecting" : "error";
-  const connLabel = connState === "online" ? "Online" : connState === "connecting" ? "Đang kết nối…" : "Offline";
-  // Các thao tác CHỈNH SỬA chỉ bật khi đã kết nối khoá (online).
-  const editEnabled = sessionReady;
+  const connLabel = connState === "online" ? "Online" : connState === "connecting" ? "~" : "Offline";
+  // Cloud edits are always available (signed in). BLE-only actions (add password / enroll) need a session.
+  const editEnabled = true;
+  const bleReady = sessionReady;
   const uidMap = buildUidMap(creds);
-  // gộp các bản ghi trùng (lock log src 10 + 46 cùng value/ts)
+  // merge duplicate records (lock log src 10 + 46 with same value/ts)
   const dedupedLogs = logs.filter((e, i) => i === 0 || !(logs[i - 1].value === e.value && Math.abs(logs[i - 1].timeStamp - e.timeStamp) < 3000));
 
   const header = (
@@ -302,7 +318,7 @@ export default function LockDetailScreen({
       </TouchableOpacity>
       <Text style={[s.title, { color: t.text }]} numberOfLines={2}>{lock.name}</Text>
       <TouchableOpacity onPress={toggle} style={s.themeBtn} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-        <Text style={s.themeIcon}>{dark ? "☀️" : "🌙"}</Text>
+        <Text style={[s.themeIcon, { color: t.text }]}>{dark ? "☀︎" : "☾"}</Text>
       </TouchableOpacity>
     </View>
   );
@@ -312,33 +328,33 @@ export default function LockDetailScreen({
       {header}
 
       <ScrollView refreshControl={<RefreshControl refreshing={loading} onRefresh={load} />}>
-        {/* Banner trạng thái kết nối BLE — data cloud vẫn hiển thị, chỉnh sửa chờ online */}
+        {/* BLE connection banner — cloud data still shows, BLE-only edits wait for online */}
         {connState !== "online" && (
           <View style={[s.connBanner, connState === "error" && s.connBannerErr]}>
             {connState === "connecting" ? (
               <>
                 <ActivityIndicator size="small" color={t.accent} />
-                <Text style={s.connBannerTxt} numberOfLines={2}>{status || "Đang kết nối tới khoá… chỉnh sửa sẽ bật khi online"}</Text>
+                <Text style={s.connBannerTxt} numberOfLines={2}>{status || "Connecting to the lock… BLE-only edits enable when online"}</Text>
               </>
             ) : (
               <>
-                <Text style={s.connBannerTxt} numberOfLines={2}>⚠️ Chưa kết nối được khoá — chỉ xem. {sessionError ? `(${sessionError.slice(0, 60)})` : ""}</Text>
+                <Text style={s.connBannerTxt} numberOfLines={2}>⚠️ Not connected to the lock — cloud actions still work. {sessionError ? `(${sessionError.slice(0, 60)})` : ""}</Text>
                 <TouchableOpacity style={s.connRetry} onPress={() => setSessionAttempt((x) => x + 1)}>
-                  <Text style={s.connRetryT}>Thử lại</Text>
+                  <Text style={s.connRetryT}>Retry</Text>
                 </TouchableOpacity>
               </>
             )}
           </View>
         )}
 
-        {/* Trạng thái */}
+        {/* Status */}
         <View style={s.statusRow}>
-          <Stat st={s} label="Pin" value={batt ? `${batt}%` : "—"} warn={!!batt && Number(batt) <= 20} />
-          <Stat st={s} label="Khoá" value={lockStateLabel(res.lock_state)} />
-          <Stat st={s} label="Kết nối" value={connLabel} warn={connState === "error"} ok={connState === "online"} />
+          <Stat st={s} label="Battery" value={batt ? `${batt}%` : "—"} warn={!!batt && Number(batt) <= 20} />
+          <Stat st={s} label="Lock" value={lockStateLabel(res.lock_state)} />
+          <Stat st={s} label="Connection" value={connLabel} warn={connState === "error"} ok={connState === "online"} />
         </View>
 
-        {/* Mở khoá — nút tròn, GIỮ để mở */}
+        {/* Unlock — round button, HOLD to open */}
         <View style={s.unlockWrap}>
           <TouchableOpacity
             style={[s.unlockCircle, holding && s.unlockCircleHold, unlocking && { opacity: 0.7 }]}
@@ -349,23 +365,23 @@ export default function LockDetailScreen({
             {unlocking ? <ActivityIndicator color="#fff" size="large" /> : (
               <>
                 <Text style={s.unlockLockIcon}>{holding ? "🔓" : "🔒"}</Text>
-                <Text style={s.unlockHoldT}>{holding ? "Giữ thêm…" : "GIỮ ĐỂ MỞ"}</Text>
+                <Text style={s.unlockHoldT}>{holding ? "Keep holding…" : "HOLD TO OPEN"}</Text>
               </>
             )}
           </TouchableOpacity>
         </View>
         {!!status && <Text style={s.statusMsg}>{status}</Text>}
 
-        {/* Người dùng — mỗi user 1 card riêng, cách nhau */}
+        {/* Users — one card per user */}
         <View style={s.section}>
           <View style={s.sectionHeadRow}>
-            <Text style={[s.sectionT, { marginBottom: 0 }]}>Người dùng ({groups.length})</Text>
+            <Text style={[s.sectionT, { marginBottom: 0 }]}>Users ({groups.length})</Text>
             <TouchableOpacity style={[s.createOutline, !editEnabled && s.disabledCtl]} disabled={busy || !editEnabled} onPress={() => { setUserName(""); setUserModal(true); }}>
-              <Text style={s.createOutlineT}>＋ Tạo user</Text>
+              <Text style={s.createOutlineT}>＋ Add user</Text>
             </TouchableOpacity>
           </View>
           {loading && !groups.length ? <ActivityIndicator style={{ margin: 16 }} /> :
-            groups.length === 0 ? <View style={s.sectionBody}><Empty st={s} t="Chưa có user." /></View> :
+            groups.length === 0 ? <View style={s.sectionBody}><Empty st={s} t="No users yet." /></View> :
               groups.map((grp) => {
                 const items = creds.filter((c) => c.typeGroupId === grp.typeGroupId);
                 const uv = userValidityText(items);
@@ -376,8 +392,8 @@ export default function LockDetailScreen({
                     <Text style={[s.userNameBig, { flex: 1 }]} numberOfLines={1}>{grp.typeGroupName}</Text>
                     <Text style={s.userMenu}>⋯</Text>
                   </TouchableOpacity>
-                  <Text style={[s.userValidity, uv.disabled && { color: t.danger }]}>⏱️ {uv.text}</Text>
-                  {items.length === 0 ? <Text style={s.emptyGroup}>Chưa có phương thức — chạm để thêm</Text> :
+                  <Text style={[s.userValidity, uv.disabled && { color: t.danger }]}>{uv.text}</Text>
+                  {items.length === 0 ? <Text style={s.emptyGroup}>No method yet — tap to add</Text> :
                     items.map((c, i) => (
                       <TouchableOpacity key={i} style={s.credRow} onPress={() => openCredActions(c)} disabled={busy}>
                         <Text style={[s.credIcon, uv.disabled && { opacity: 0.35 }]}>{credTypeIcon(c.type)}</Text>
@@ -391,13 +407,13 @@ export default function LockDetailScreen({
                 </View>
                 );
               })}
-          <Text style={s.hintRow}>Chạm 1 user để quản lý (hiệu lực · thêm mật khẩu/vân tay/thẻ · xoá · đổi tên)</Text>
+          <Text style={s.hintRow}>Tap a user to manage (validity · add password/fingerprint/card · delete · rename)</Text>
         </View>
 
-        {/* Lịch sử mở khoá — icon + phương thức + ai + giờ */}
-        <Section st={s} title={`Lịch sử mở khoá (${dedupedLogs.length})`}>
+        {/* Unlock history — icon + method + who + time */}
+        <Section st={s} title={`Unlock history (${dedupedLogs.length})`}>
           {loading && !logs.length ? <ActivityIndicator style={{ margin: 16 }} /> :
-            dedupedLogs.length === 0 ? <Empty st={s} t="Chưa có lịch sử." /> :
+            dedupedLogs.length === 0 ? <Empty st={s} t="No history yet." /> :
               dedupedLogs.slice(0, 50).map((e, i) => {
                 const d = decodeUnlockLog(e, uidMap);
                 return (
@@ -416,7 +432,7 @@ export default function LockDetailScreen({
         <View style={{ height: 40 }} />
       </ScrollView>
 
-      {/* Bottom-sheet chi tiết credential (đóng bằng nút Đóng hoặc back) */}
+      {/* Bottom-sheet: credential details */}
       <Modal visible={!!credSheet} transparent animationType="slide" onRequestClose={() => setCredSheet(null)}>
         <TouchableOpacity style={s.sheetBg} activeOpacity={1} onPress={() => setCredSheet(null)}>
           <TouchableOpacity style={s.sheet} activeOpacity={1} onPress={() => {}}>
@@ -431,16 +447,15 @@ export default function LockDetailScreen({
                       <Text style={s.sheetSub}>{credTypeLabel(c.type)} · {c.typeGroupName}</Text>
                     </View>
                   </View>
-                  <Text style={s.sheetHint}>Hiệu lực cài theo USER (chạm tên user). Ở đây chỉ đổi tên / xoá phương thức này.</Text>
-                  {!editEnabled && <Text style={s.sheetGateNote}>⏳ Đang kết nối khoá — thao tác chỉnh sửa sẽ bật khi online.</Text>}
+                  <Text style={s.sheetHint}>Validity is set per USER (tap the user name). Here you can only rename / delete this method.</Text>
                   <TouchableOpacity style={[s.sheetAct, !editEnabled && s.disabledCtl]} disabled={!editEnabled} onPress={() => { setRenameText(c.typeName ?? ""); setCredSheet(null); setRenameTarget(c); }}>
-                    <Text style={s.sheetActT}>✏️  Đổi tên</Text>
+                    <Text style={s.sheetActT}>✏️  Rename</Text>
                   </TouchableOpacity>
                   <TouchableOpacity style={[s.sheetAct, !editEnabled && s.disabledCtl]} disabled={!editEnabled} onPress={() => doDelete(c)}>
-                    <Text style={[s.sheetActT, { color: "#e0563b" }]}>🗑️  Xoá</Text>
+                    <Text style={[s.sheetActT, { color: "#e0563b" }]}>🗑️  Delete</Text>
                   </TouchableOpacity>
                   <TouchableOpacity style={s.sheetClose} onPress={() => setCredSheet(null)}>
-                    <Text style={s.sheetCloseT}>Đóng</Text>
+                    <Text style={s.sheetCloseT}>Close</Text>
                   </TouchableOpacity>
                 </>
               );
@@ -449,7 +464,7 @@ export default function LockDetailScreen({
         </TouchableOpacity>
       </Modal>
 
-      {/* Bottom-sheet quản lý cả USER (nhóm) */}
+      {/* Bottom-sheet: manage whole USER (group) */}
       <Modal visible={!!groupSheet} transparent animationType="slide" onRequestClose={() => setGroupSheet(null)}>
         <TouchableOpacity style={s.sheetBg} activeOpacity={1} onPress={() => setGroupSheet(null)}>
           <TouchableOpacity style={s.sheet} activeOpacity={1} onPress={() => {}}>
@@ -463,11 +478,11 @@ export default function LockDetailScreen({
                     <Text style={s.sheetIcon}>👤</Text>
                     <View style={{ flex: 1 }}>
                       <Text style={s.sheetTitle}>{g.groupName}</Text>
-                      <Text style={[s.sheetSub, uv.disabled && { color: "#e0563b" }]}>{total} phương thức · ⏱️ {uv.text}</Text>
+                      <Text style={[s.sheetSub, uv.disabled && { color: "#e0563b" }]}>{total} method{total === 1 ? "" : "s"} · {uv.text}</Text>
                     </View>
                   </View>
-                  {!editEnabled && <Text style={s.sheetGateNote}>⏳ Đang kết nối khoá — thao tác chỉnh sửa sẽ bật khi online.</Text>}
-                  <TouchableOpacity style={[s.sheetAct, !editEnabled && s.disabledCtl]} disabled={!editEnabled} onPress={() => {
+                  {!bleReady && <Text style={s.sheetGateNote}>⏳ Adding a password / fingerprint / card needs a BLE connection (waiting for online).</Text>}
+                  <TouchableOpacity style={s.sheetAct} onPress={() => {
                     const cur = readUserValidity(g.items);
                     if (cur.deadline == null) setVDeadline("forever");
                     else if (cur.deadline * 1000 < Date.now()) setVDeadline("past");
@@ -475,40 +490,40 @@ export default function LockDetailScreen({
                     setVAllDay(cur.allDay); setVStartMin(cur.startMin); setVEndMin(cur.endMin);
                     setGroupSheet(null); setValidityModal({ groupId: g.groupId, groupName: g.groupName, items: g.items });
                   }}>
-                    <Text style={[s.sheetActT, { color: "#7a4ed8" }]}>⏱️  Cài thời gian hiệu lực</Text>
+                    <Text style={[s.sheetActT, { color: "#7a4ed8" }]}>⏱️  Set validity</Text>
                   </TouchableOpacity>
                   {total > 0 && (uv.disabled ? (
-                    <TouchableOpacity style={[s.sheetAct, !editEnabled && s.disabledCtl]} disabled={!editEnabled} onPress={() => doGroupToggle(g.items, false)}>
-                      <Text style={[s.sheetActT, { color: t.ok }]}>✅  Kích hoạt user (mở khoá ngay)</Text>
+                    <TouchableOpacity style={s.sheetAct} onPress={() => doGroupToggle(g.items, false)}>
+                      <Text style={[s.sheetActT, { color: t.ok }]}>✅  Enable user (unlock now)</Text>
                     </TouchableOpacity>
                   ) : (
-                    <TouchableOpacity style={[s.sheetAct, !editEnabled && s.disabledCtl]} disabled={!editEnabled} onPress={() => doGroupToggle(g.items, true)}>
-                      <Text style={[s.sheetActT, { color: t.danger }]}>⛔  Vô hiệu hoá user (khoá ngay)</Text>
+                    <TouchableOpacity style={s.sheetAct} onPress={() => doGroupToggle(g.items, true)}>
+                      <Text style={[s.sheetActT, { color: t.danger }]}>⛔  Disable user (lock now)</Text>
                     </TouchableOpacity>
                   ))}
-                  <TouchableOpacity style={[s.sheetAct, !editEnabled && s.disabledCtl]} disabled={!editEnabled} onPress={() => {
+                  <TouchableOpacity style={[s.sheetAct, !bleReady && s.disabledCtl]} disabled={!bleReady} onPress={() => {
                     setPwdDigits(""); setPwdName(""); setGroupSheet(null);
                     setPwdModal({ groupId: g.groupId, groupName: g.groupName, typeGroup: g.typeGroup });
                   }}>
-                    <Text style={[s.sheetActT, { color: "#3b5bff" }]}>🔢  Thêm mật khẩu</Text>
+                    <Text style={[s.sheetActT, { color: "#3b5bff" }]}>🔢  Add password</Text>
                   </TouchableOpacity>
-                  <TouchableOpacity style={[s.sheetAct, !editEnabled && s.disabledCtl]} disabled={!editEnabled} onPress={() => doEnrollPlaceholder("vân tay")}>
-                    <Text style={s.sheetActT}>🫆  Thêm vân tay</Text>
+                  <TouchableOpacity style={[s.sheetAct, !bleReady && s.disabledCtl]} disabled={!bleReady} onPress={() => doEnrollPlaceholder("fingerprint")}>
+                    <Text style={s.sheetActT}>🫆  Add fingerprint</Text>
                   </TouchableOpacity>
-                  <TouchableOpacity style={[s.sheetAct, !editEnabled && s.disabledCtl]} disabled={!editEnabled} onPress={() => doEnrollPlaceholder("thẻ từ")}>
-                    <Text style={s.sheetActT}>💳  Thêm thẻ từ</Text>
+                  <TouchableOpacity style={[s.sheetAct, !bleReady && s.disabledCtl]} disabled={!bleReady} onPress={() => doEnrollPlaceholder("NFC card")}>
+                    <Text style={s.sheetActT}>💳  Add NFC card</Text>
                   </TouchableOpacity>
-                  <TouchableOpacity style={[s.sheetAct, !editEnabled && s.disabledCtl]} disabled={!editEnabled} onPress={() => {
+                  <TouchableOpacity style={s.sheetAct} onPress={() => {
                     setRenameUserText(g.groupName); setGroupSheet(null);
                     setRenameUserTarget({ groupId: g.groupId, groupName: g.groupName, typeGroup: g.typeGroup });
                   }}>
-                    <Text style={s.sheetActT}>✏️  Đổi tên user</Text>
+                    <Text style={s.sheetActT}>✏️  Rename user</Text>
                   </TouchableOpacity>
-                  <TouchableOpacity style={[s.sheetAct, !editEnabled && s.disabledCtl]} disabled={!editEnabled} onPress={() => doDeleteUser({ groupId: g.groupId, groupName: g.groupName })}>
-                    <Text style={[s.sheetActT, { color: "#e0563b" }]}>🗑️  Xoá user</Text>
+                  <TouchableOpacity style={s.sheetAct} onPress={() => doDeleteUser({ groupId: g.groupId, groupName: g.groupName })}>
+                    <Text style={[s.sheetActT, { color: "#e0563b" }]}>🗑️  Delete user</Text>
                   </TouchableOpacity>
                   <TouchableOpacity style={s.sheetClose} onPress={() => setGroupSheet(null)}>
-                    <Text style={s.sheetCloseT}>Đóng</Text>
+                    <Text style={s.sheetCloseT}>Close</Text>
                   </TouchableOpacity>
                 </>
               );
@@ -517,74 +532,74 @@ export default function LockDetailScreen({
         </TouchableOpacity>
       </Modal>
 
-      {/* Modal đổi tên */}
+      {/* Rename modal */}
       <Modal visible={!!renameTarget} transparent animationType="fade" onRequestClose={() => setRenameTarget(null)}>
         <View style={s.modalBg}>
           <View style={s.modalBox}>
-            <Text style={s.modalT}>Đổi tên</Text>
-            <TextInput placeholderTextColor={t.faint} style={s.modalInput} value={renameText} onChangeText={setRenameText} autoFocus placeholder="Tên mới" />
+            <Text style={s.modalT}>Rename</Text>
+            <TextInput placeholderTextColor={t.faint} style={s.modalInput} value={renameText} onChangeText={setRenameText} autoFocus placeholder="New name" />
             <View style={s.modalRow}>
-              <TouchableOpacity onPress={() => setRenameTarget(null)}><Text style={s.modalCancel}>Huỷ</Text></TouchableOpacity>
-              <TouchableOpacity onPress={submitRename}><Text style={s.modalOk}>Lưu</Text></TouchableOpacity>
+              <TouchableOpacity onPress={() => setRenameTarget(null)}><Text style={s.modalCancel}>Cancel</Text></TouchableOpacity>
+              <TouchableOpacity onPress={submitRename}><Text style={s.modalOk}>Save</Text></TouchableOpacity>
             </View>
           </View>
         </View>
       </Modal>
 
-      {/* Modal tạo MẬT KHẨU */}
+      {/* Create PASSWORD modal */}
       <Modal visible={!!pwdModal} transparent animationType="fade" onRequestClose={() => setPwdModal(null)}>
         <View style={s.modalBg}>
           <View style={s.modalBox}>
-            <Text style={s.modalT}>Tạo mật khẩu{pwdModal?.groupName ? ` · ${pwdModal.groupName}` : " (user mới)"}</Text>
-            <TextInput placeholderTextColor={t.faint} style={s.modalInput} value={pwdDigits} onChangeText={(t) => setPwdDigits(t.replace(/\D/g, "").slice(0, 10))}
-              keyboardType="number-pad" autoFocus placeholder="Mật khẩu 6–10 chữ số" maxLength={10} />
-            <TextInput placeholderTextColor={t.faint} style={[s.modalInput, { marginTop: 10 }]} value={pwdName} onChangeText={setPwdName} placeholder="Tên (vd Mật khẩu khách)" />
-            <Text style={s.modalHint}>Lập trình thẳng vào khoá qua BLE (cần ở gần khoá).</Text>
+            <Text style={s.modalT}>Create password{pwdModal?.groupName ? ` · ${pwdModal.groupName}` : " (new user)"}</Text>
+            <TextInput placeholderTextColor={t.faint} style={s.modalInput} value={pwdDigits} onChangeText={(x) => setPwdDigits(x.replace(/\D/g, "").slice(0, 10))}
+              keyboardType="number-pad" autoFocus placeholder="6–10 digit password" maxLength={10} />
+            <TextInput placeholderTextColor={t.faint} style={[s.modalInput, { marginTop: 10 }]} value={pwdName} onChangeText={setPwdName} placeholder="Name (e.g. Guest code)" />
+            <Text style={s.modalHint}>Programmed straight into the lock over BLE (must be near the lock).</Text>
             <View style={s.modalRow}>
-              <TouchableOpacity onPress={() => setPwdModal(null)}><Text style={s.modalCancel}>Huỷ</Text></TouchableOpacity>
-              <TouchableOpacity onPress={submitCreatePassword}><Text style={s.modalOk}>Tạo</Text></TouchableOpacity>
+              <TouchableOpacity onPress={() => setPwdModal(null)}><Text style={s.modalCancel}>Cancel</Text></TouchableOpacity>
+              <TouchableOpacity onPress={submitCreatePassword}><Text style={s.modalOk}>Create</Text></TouchableOpacity>
             </View>
           </View>
         </View>
       </Modal>
 
-      {/* Modal đổi tên USER */}
+      {/* Rename USER modal */}
       <Modal visible={!!renameUserTarget} transparent animationType="fade" onRequestClose={() => setRenameUserTarget(null)}>
         <View style={s.modalBg}>
           <View style={s.modalBox}>
-            <Text style={s.modalT}>Đổi tên user</Text>
-            <TextInput placeholderTextColor={t.faint} style={s.modalInput} value={renameUserText} onChangeText={setRenameUserText} autoFocus placeholder="Tên user mới" />
+            <Text style={s.modalT}>Rename user</Text>
+            <TextInput placeholderTextColor={t.faint} style={s.modalInput} value={renameUserText} onChangeText={setRenameUserText} autoFocus placeholder="New user name" />
             <View style={s.modalRow}>
-              <TouchableOpacity onPress={() => setRenameUserTarget(null)}><Text style={s.modalCancel}>Huỷ</Text></TouchableOpacity>
-              <TouchableOpacity onPress={submitRenameUser}><Text style={s.modalOk}>Lưu</Text></TouchableOpacity>
+              <TouchableOpacity onPress={() => setRenameUserTarget(null)}><Text style={s.modalCancel}>Cancel</Text></TouchableOpacity>
+              <TouchableOpacity onPress={submitRenameUser}><Text style={s.modalOk}>Save</Text></TouchableOpacity>
             </View>
           </View>
         </View>
       </Modal>
 
-      {/* Modal tạo USER trống */}
+      {/* Create empty USER modal */}
       <Modal visible={userModal} transparent animationType="fade" onRequestClose={() => setUserModal(false)}>
         <View style={s.modalBg}>
           <View style={s.modalBox}>
-            <Text style={s.modalT}>Tạo user mới</Text>
-            <TextInput placeholderTextColor={t.faint} style={s.modalInput} value={userName} onChangeText={setUserName} autoFocus placeholder="Tên user (vd Khách)" />
-            <Text style={s.modalHint}>Tạo nhóm user (cloud). Thêm vân tay/mật khẩu cho user này sau.</Text>
+            <Text style={s.modalT}>New user</Text>
+            <TextInput placeholderTextColor={t.faint} style={s.modalInput} value={userName} onChangeText={setUserName} autoFocus placeholder="User name (e.g. Guest)" />
+            <Text style={s.modalHint}>Creates a user group (cloud). Add a fingerprint/password for this user later.</Text>
             <View style={s.modalRow}>
-              <TouchableOpacity onPress={() => setUserModal(false)}><Text style={s.modalCancel}>Huỷ</Text></TouchableOpacity>
-              <TouchableOpacity onPress={submitCreateUser}><Text style={s.modalOk}>Tạo</Text></TouchableOpacity>
+              <TouchableOpacity onPress={() => setUserModal(false)}><Text style={s.modalCancel}>Cancel</Text></TouchableOpacity>
+              <TouchableOpacity onPress={submitCreateUser}><Text style={s.modalOk}>Create</Text></TouchableOpacity>
             </View>
           </View>
         </View>
       </Modal>
 
-      {/* Modal CÀI THỜI GIAN HIỆU LỰC theo user */}
+      {/* SET VALIDITY per user modal */}
       <Modal visible={!!validityModal} transparent animationType="fade" onRequestClose={() => setValidityModal(null)}>
         <View style={s.modalBg}>
           <View style={s.modalBox}>
-            <Text style={s.modalT}>Hiệu lực · {validityModal?.groupName}</Text>
-            <Text style={s.modalLabel}>Hiệu lực đến</Text>
+            <Text style={s.modalT}>Validity · {validityModal?.groupName}</Text>
+            <Text style={s.modalLabel}>Valid until</Text>
             <View style={s.chipRow}>
-              {([["forever", "Vĩnh viễn"], ["1", "1 ngày"], ["7", "7 ngày"], ["30", "30 ngày"], ["custom", "Số ngày…"], ["past", "Vô hiệu ngay"]] as const).map(([k, lbl]) => (
+              {([["forever", "Forever"], ["1", "1 day"], ["7", "7 days"], ["30", "30 days"], ["custom", "Days…"], ["past", "Disable now"]] as const).map(([k, lbl]) => (
                 <TouchableOpacity key={k} style={[s.chip, vDeadline === k && s.chipOn]} onPress={() => setVDeadline(k)}>
                   <Text style={[s.chipT, vDeadline === k && s.chipTOn]}>{lbl}</Text>
                 </TouchableOpacity>
@@ -595,13 +610,13 @@ export default function LockDetailScreen({
                 <TextInput placeholderTextColor={t.faint} style={s.daysInput} value={vCustomDays}
                   onChangeText={(x) => setVCustomDays(x.replace(/\D/g, "").slice(0, 4))}
                   keyboardType="number-pad" placeholder="3" maxLength={4} />
-                <Text style={s.daysSuffix}>ngày kể từ hôm nay</Text>
+                <Text style={s.daysSuffix}>days from today</Text>
               </View>
             )}
             <View style={s.allDayRow}>
-              <Text style={s.modalLabel}>Khung giờ trong ngày</Text>
+              <Text style={s.modalLabel}>Daily time window</Text>
               <View style={s.allDayToggle}>
-                <Text style={s.allDayTxt}>Cả ngày</Text>
+                <Text style={s.allDayTxt}>All day</Text>
                 <Switch value={vAllDay} onValueChange={setVAllDay}
                   trackColor={{ true: "#7a4ed8", false: t.border }} thumbColor="#fff" />
               </View>
@@ -625,10 +640,10 @@ export default function LockDetailScreen({
               <DateTimePicker mode="time" is24Hour value={minToDate(vEndMin)} display="clock"
                 onChange={(_e, d) => { setShowEndPicker(false); if (d) setVEndMin(d.getHours() * 60 + d.getMinutes()); }} />
             )}
-            <Text style={s.modalHint}>Áp cho MỌI phương thức của user qua BLE (cần ở gần khoá).</Text>
+            <Text style={s.modalHint}>{bleReady ? "Applied to EVERY method of this user over BLE (must be near the lock)." : "No BLE — applied via cloud; takes effect when the hub syncs to the lock."}</Text>
             <View style={s.modalRow}>
-              <TouchableOpacity onPress={() => setValidityModal(null)}><Text style={s.modalCancel}>Huỷ</Text></TouchableOpacity>
-              <TouchableOpacity onPress={submitUserValidity}><Text style={s.modalOk}>Lưu</Text></TouchableOpacity>
+              <TouchableOpacity onPress={() => setValidityModal(null)}><Text style={s.modalCancel}>Cancel</Text></TouchableOpacity>
+              <TouchableOpacity onPress={submitUserValidity}><Text style={s.modalOk}>Save</Text></TouchableOpacity>
             </View>
           </View>
         </View>
@@ -720,7 +735,7 @@ const makeStyles = (t: Palette) => StyleSheet.create({
   daysRow: { flexDirection: "row", alignItems: "center", marginTop: 10 },
   daysInput: { borderWidth: 1, borderColor: t.border, backgroundColor: t.inputBg, color: t.text, borderRadius: 10, paddingVertical: 8, paddingHorizontal: 12, fontSize: 16, width: 70, textAlign: "center" },
   daysSuffix: { color: t.sub, fontSize: 13, marginLeft: 10 },
-  allDayRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  allDayRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 22 },
   allDayToggle: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 8 },
   allDayTxt: { color: t.sub, fontSize: 13, fontWeight: "600" },
   connBanner: { flexDirection: "row", alignItems: "center", gap: 10, marginHorizontal: 16, marginBottom: 10, backgroundColor: t.chip, borderRadius: 12, paddingVertical: 10, paddingHorizontal: 14 },
