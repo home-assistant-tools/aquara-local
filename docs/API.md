@@ -1,4 +1,4 @@
-# Aqara D100 — API Documentation (Cloud + BLE)
+# Aqara D100 — API Documentation (Cloud + BLE + Local)
 
 Complete technical documentation for controlling the **Aqara D100 (dp1a / aqara.lock.aqgl01)** lock without the original app.
 Everything has been **reverse-engineered + verified for real** (tested on a real lock, firmware ack `00`). For use with devices **owned by the owner themselves** — legal interoperability; do NOT redistribute the Aqara APK/keys.
@@ -68,10 +68,29 @@ sign = md5(pre).hexdigest()                        (32 hex, lowercase)
 | **Create user (group)** | POST `/dev/lock/user/group/add` | `{did,typeGroup,typeGroupId,typeGroupName}` | `{code:0}` |
 | **Delete user (group)** | POST `/dev/lock/user/group/del` | `{did,typeGroupIds:["<id>"]}` | `{code:0}` |
 | **Rename user** | POST `/dev/lock/user/group/update` | `{did,typeGroupId,typeGroupName,typeGroup}` | `{code:0}` |
-| **Handshake publickey** | POST `/dev/bluetooth/login/assure/publickey` | `{deviceId}` | `{cloudPublicKey(65B "04"+P256),mac}` |
-| **Handshake verify** | POST `/dev/bluetooth/login/assure/verify` | `{deviceId,devicePublicKey}` | `{sessionKey(16B),nonce(13B),verifyData(8B),mac}` |
+| **⭐ Control (unlock/lock)** | POST `/matter/write` | `{data:{"<ep.fn.cmd.0>":<value>},did,pwd:"",type:0}` | `{result:"",code:0}` |
+| **BLE handshake publickey** | POST `/dev/bluetooth/login/assure/publickey` | `{deviceId}` | `{cloudPublicKey(65B "04"+P256),mac}` |
+| **BLE handshake verify** | POST `/dev/bluetooth/login/assure/verify` | `{deviceId,devicePublicKey}` | `{sessionKey(16B),nonce(13B),verifyData(8B),mac}` |
+| **Local P2P info** | GET `/devex/camera/p2p/info` | `did=<did>` | `{initStringApp:"<init>:<ppcs-key>",devP2pPublicKey,p2pId}` |
+| **Local P2P sign** | POST `/devex/camera/p2p/sign` | `{devPwd:"",did,p2pAppPublicKey}` | `{sign,p2pDevPublicKey,time}` |
 
 Errors: `code !== 0` (e.g. `106 Invalid sign`, `810 wrong password`, `818 account locked`).
+
+#### Control commands — Matter DoorLock traits (`ep.fn.cmd.0`)
+`POST /matter/write {data:{"<trait>":<value>},did,pwd:"",type:0}` — decoded from the lock's
+React Native plugin `CommandSpec` (endpoint 2 / function 148). It's Aqara's Matter-*shaped*
+internal model, **not** real Matter (the D100 is a Zigbee lock). The cloud relays it to the hub
+(or the same command goes over the local hub UDP tunnel — see Part 3).
+
+| Command | trait | value | | Command | trait |
+|---|---|---|---|---|---|
+| **unlock** | `2.148.35011.0` | `""` ✅ | | setUser | `2.148.40032.0` |
+| **lock** | `2.148.35010.0` | `""` ✅ | | clearUser | `2.148.40034.0` |
+| **unbolt** | `2.148.40031.0` | `""` | | setCredential | `2.148.40035.0` |
+| identify | `1.131.32918.0` | `""` | | set/get/clear week/year sched | `2.148.40025‑40030` |
+
+`lock_state` resource value: `1`=locked · `2`=unlocked · `0`=latch-error.
+Requires `enable_remote_operation == "1"` on the lock + hub online.
 
 ### 1.6 Shared enums & encoding
 - **type** (credential type): `1`=fingerprint · `2`=password · `3`=NFC · `4`=eKey/BLE · `5`=temporary password · `6`=face · `7`=NFC tag.
@@ -198,7 +217,64 @@ enable : each credential → 03/21 validRange, deadline = ffffffff (permanent)  
 
 ---
 
-## Part 3 — Code map
+## Part 3 — LOCAL (LAN, no internet for the command itself)
+
+When the phone is on the **same LAN as the hub (G410)**, the app does not send the command to the
+cloud — it sends it **directly to the hub** over a **ThroughTek (TUTK) PPCS** P2P tunnel, and the
+hub relays it to the lock over Zigbee. The application command is **identical** to the cloud
+`/matter/write` body. Implementation/scaffold: `custom_components/aqara_d100/local.py`.
+
+### 3.1 Stack (top → bottom)
+```
+Layer 1  Matter command   {"2.148.35011.0":""}                          (same as cloud, Part 1)
+Layer 2  "lumi" frame      b"lumi"(6c756d69) + type(LE32) + seq(LE32) + len(LE32) + payload
+Layer 3  TUTK PPCS         PPCS_Write → cs2p2p__P2P_Proprietary_Encrypt(KEY,…) → UDP "28…" to hub
+```
+On the LAN there is **no NAT** → none of PPCS's hole-punching / supernode / relay is used; it is
+plain UDP to `hub:port`.
+
+### 3.2 lumi frame types
+| type | meaning | payload |
+|---|---|---|
+| `0x1000` | login / auth | `LOGIN_JSON` (3.4) |
+| `0x1024` | keepalive | empty (len 0) |
+| (cmd) | control | the Matter trait JSON, e.g. `{"2.148.35011.0":""}` |
+
+### 3.3 Session setup — cloud-assisted (cacheable), then local
+```
+1. GET  /devex/camera/p2p/info?did=<did>
+        → initStringApp = "<tutk-init-string>:<PPCS-KEY>"   (PPCS-KEY is the cipher key)
+        → p2pId        = TUTK DID, e.g. AQARAKR-XXXXXX-XXXXX
+        → devP2pPublicKey (hub static X25519 pubkey)
+2. generate an ephemeral X25519 keypair  → app_public_key
+3. POST /devex/camera/p2p/sign {devPwd:"",did,p2pAppPublicKey:<app_public_key>}
+        → sign  ==  the LOGIN_JSON `app_sign`  (cloud authorises this session — like the BLE handshake)
+4. open the PPCS tunnel to p2pId on the LAN
+5. PPCS_Write( lumi(0x1000, LOGIN_JSON) )      # authenticate
+6. PPCS_Write( lumi(cmd,    {"2.148.35011.0":""}) )   # unlock
+```
+
+### 3.4 LOGIN_JSON (Layer-2 payload, type 0x1000)
+```json
+{"app_public_key":"<32B hex, ephemeral X25519 pub>",
+ "app_sign":"<= p2p/sign .sign>",
+ "device_id":"<did>",
+ "timestamp":"<unix-ms>"}
+```
+
+### 3.5 Layer-3 cipher
+`cs2p2p__P2P_Proprietary_Encrypt(const char* key, const u8* in, u8* out, u16 len)` in
+`libPPCS_API.so` — the TUTK proprietary cipher (CVE-2021-28372 "Kalay" class). **KEY** = the part
+after `:` in `initStringApp` (per-product, returned by p2p/info). A second TUTK base key is used
+for the session layer. Wire frames begin `0x28…`. Captured plaintext↔ciphertext pairs confirm the
+252-byte login plaintext encrypts to the exact wire frame.
+
+> To drive this standalone you need a `PpcsTransport` backend (the TUTK SDK, or a reimplementation
+> of the cipher — the key is known). `local.py` provides everything except that transport.
+
+---
+
+## Part 4 — Code map
 ```
 app/src/cloud/login.ts          email/password login (RSA BigInt + sign)
 app/src/cloud/AqaraCloud.ts     all cloud endpoints (1.5)
@@ -212,4 +288,10 @@ app/src/ble/LockController.ts   handshake + unlock + setValidity + createPasswor
 app/src/ble/BlePlxClient.ts     ble-plx connect retry + write/monitor
 tools/aqara_sign.py             sign reimpl (self-test 5/5)
 tools/ble_validity.py / ble_delgroup.py / ble_cmd.py   inject BLE commands via piggyback
+custom_components/aqara_d100/cloud.py    Cloud API (login, sign, matter/write, p2p creds)
+custom_components/aqara_d100/ble.py      BLE API (handshake + openLock via ESP proxy)
+custom_components/aqara_d100/local.py    Local API (lumi framing + PPCS session, Part 3)
 ```
+
+See also **[REVERSE_ENGINEERING.md](REVERSE_ENGINEERING.md)** for the full how-it-was-cracked
+write-up (tools, the SecNeo anti-frida bypass, the dead ends).
