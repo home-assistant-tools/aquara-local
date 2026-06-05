@@ -71,7 +71,7 @@ sign = md5(pre).hexdigest()                        (32 hex, lowercase)
 | **⭐ Control (unlock/lock)** | POST `/matter/write` | `{data:{"<ep.fn.cmd.0>":<value>},did,pwd:"",type:0}` | `{result:"",code:0}` |
 | **BLE handshake publickey** | POST `/dev/bluetooth/login/assure/publickey` | `{deviceId}` | `{cloudPublicKey(65B "04"+P256),mac}` |
 | **BLE handshake verify** | POST `/dev/bluetooth/login/assure/verify` | `{deviceId,devicePublicKey}` | `{sessionKey(16B),nonce(13B),verifyData(8B),mac}` |
-| **Local P2P info** | GET `/devex/camera/p2p/info` | `did=<did>` | `{initStringApp:"<init>:<ppcs-key>",devP2pPublicKey,p2pId}` |
+| **Local P2P info** | GET `/devex/camera/p2p/info` | `did=<did>` | `{initStringApp:"<init>:aqarakr19kn",devP2pPublicKey,p2pId}` |
 | **Local P2P sign** | POST `/devex/camera/p2p/sign` | `{devPwd:"",did,p2pAppPublicKey}` | `{sign,p2pDevPublicKey,time}` |
 
 Errors: `code !== 0` (e.g. `106 Invalid sign`, `810 wrong password`, `818 account locked`).

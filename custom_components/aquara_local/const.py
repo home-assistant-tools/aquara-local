@@ -53,6 +53,15 @@ CONF_LOCK_MAC = "mac"
 CONF_LOCK_MODEL = "model"
 
 # ---- Behaviour ------------------------------------------------------------
+# BLE-direct control of the D100 is DISABLED by default. Testing (2026-06) proved
+# the lock filters connections at the link layer — it only accepts a central that
+# already holds the phone's BLE bond (LTK/IRK), so a standalone ESP32 proxy can see
+# the advert but its CONNECT is silently dropped ("piggyback only"). Leaving BLE in
+# the command path would just hang ~30-60s every unlock before falling back to cloud.
+# The full BLE stack is kept (ble.py/gatt.py/protocol.py) for a future bonded proxy;
+# flip this to True only if you have one. Cloud is the reliable control path.
+BLE_CONTROL_ENABLED = False
+
 # Cloud is polled for lock_state / battery; the lock event log is polled faster
 # so HA can fire near-realtime "who opened the door" events for automations.
 SCAN_INTERVAL_SECONDS = 60

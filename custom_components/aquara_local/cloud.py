@@ -395,9 +395,9 @@ class AqaraCloud:
     # The lock's local channel rides on the doorbell/hub's ThroughTek (TUTK) P2P tunnel.
     # These two calls hand the app everything it needs to open that tunnel — see api/local.py.
     async def p2p_info(self, did: str) -> dict[str, str]:
-        """GET p2p/info → {initStringApp:"<tutk-init-string>:<ppcs-key>", devP2pPublicKey, p2pId}.
+        """GET p2p/info → {initStringApp:"<tutk-init-string>:aqarakr19kn", devP2pPublicKey, p2pId}.
 
-        `initStringApp` is "<base64-ish init string>:<ppcs aes key>" (e.g. ...:<ppcs-key>) —
+        `initStringApp` is "<base64-ish init string>:<ppcs aes key>" (e.g. ...:aqarakr19kn) —
         the PPCS proprietary-encrypt key. `p2pId` is the TUTK DID (e.g. AQARAKR-XXXXXX-XXXXX).
         """
         return await self.get("/devex/camera/p2p/info", {"did": did})

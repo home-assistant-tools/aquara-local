@@ -15,8 +15,8 @@ the engineering log: what was tried, the dead ends, every tool used, and the got
 | Path | How it works | Needs | Status |
 |------|--------------|-------|--------|
 | **Cloud** | `POST /matter/write {data:{"2.148.35011.0":""},did,…}` → Aqara cloud → hub → Zigbee | internet + hub online + "remote operation" enabled | ✅ **works, shipped** |
-| **BLE** | MIoT/Mijia BLE: cloud handshake → `01/74` AES-CCM openLock over GATT | an ESP32 ESPHome `bluetooth_proxy` near the door | 🟡 protocol solved; standalone GATT connect is blocked by the lock (piggyback works) |
-| **Local** | TUTK PPCS P2P tunnel to the hub on the LAN, carrying the same Matter command | cloud-issued P2P creds (cacheable) + a TUTK PPCS backend | 🔬 fully mapped; transport needs the TUTK cipher |
+| **BLE** | MIoT/Mijia BLE: cloud handshake → `01/74` AES-CCM openLock over GATT | an ESP32 ESPHome `bluetooth_proxy` near the door | 🟡 protocol solved; **standalone GATT connect is blocked by the lock** (it only accepts a central already bonded to the phone — see §3) |
+| **Local** | TUTK PPPP/Kalay P2P tunnel to the hub on the LAN, carrying the same Matter command | cloud-issued P2P creds (cacheable) + LAN reachability to the hub | ✅ **WORKS — verified live**: pure-Python (cipher + PPPP transport), no `.so`/frida/phone; the D100 physically unlocked (`{"code":"0"}`) |
 
 All three ultimately deliver the **same command**: Matter DoorLock trait `2.148.35011.0 = ""`.
 
@@ -104,11 +104,22 @@ hooking `EncryptModule.encryptAESCCM`) — the self-built openLock packet matche
   unbolt=`02`). ⚠️ NOT `18`(UN_LOCK) — that's just `setUnlockAlarmInfo`.
 - CRC is appended **byte-swapped** (openLock plaintext = `7401`**`f404`**).
 
-**Gotcha:** a *standalone* central (ESP32/laptop) connecting to the lock is **rejected** by the
-lock — the proven unlock used **piggyback injection** into the app's existing GATT link
-(`frida/ble_inject.js`). The ESP32 proxy path also needs the lock to accept a fresh connection
-(blocked when the phone holds the link). Implementation: `custom_components/aquara_local/{ble,
-gatt,protocol,crypto}.py` + `tools/ble_esp32_test.py` + `tools/esp32-d100-proxy.yaml`.
+**Gotcha (confirmed by live test 2026-06):** a *standalone* central (ESP32 proxy/laptop) **cannot
+even open the GATT connection** to the lock. Via a working ESP32 `bluetooth_proxy` we could scan
+and see the lock's advert clearly (addr `…` RSSI −60), but `bluetooth_device_connect` **times out
+at the link layer** — the lock never answers the CONNECT — *even with the phone's Bluetooth fully
+off*. So it is **not** "the phone holds the link"; the lock **filters connections to centrals it
+has bonded** (the phone that paired at setup, holding the SMP **LTK/IRK**). Connection happens
+*before* pairing, so an unbonded ESP32 is dropped before any handshake. The proven unlock therefore
+used **piggyback injection** into the app's *already-open* GATT link (`frida/ble_inject.js`).
+Bottom line: BLE-direct control needs the phone's bond material; **use Cloud or Local instead.**
+Two more findings from that test, folded into the code:
+- The cloud reports the lock MAC **byte-reversed** vs the BLE advert address (cloud `5A58004D56ED`
+  ↔ advert `ED:56:4D:00:58:5A`). `tools/ble_esp32_test.py` now matches both orders.
+- esphome 2026.x dropped *parsed* adverts → use `subscribe_bluetooth_le_raw_advertisements`; and
+  `bluetooth_device_connect` requires passing the proxy's `feature_flags` (REMOTE_CACHING).
+Implementation: `custom_components/aquara_local/{ble,gatt,protocol,crypto}.py` +
+`tools/ble_esp32_test.py` + `tools/esp32-d100-proxy.yaml`.
 
 ---
 
@@ -140,31 +151,80 @@ This was the hard one. Chronological:
    stack, reused for the hub's local channel). Hooking the JNI `PPCS_Write` exposed the
    **plaintext** before encryption.
 
-### 4.5 The full local stack (solved)
+### 4.5 The full local stack (SOLVED — reimplemented in pure Python)
 
 ```
-Layer 1  Matter command   {"2.148.35011.0":""}                         (from RN bundle)
-Layer 2  "lumi" frame      b"lumi" + type(4) + seq(4) + len(4) + payload (login type 0x1000)
-Layer 3  TUTK PPCS         cs2p2p__P2P_Proprietary_Encrypt(KEY, plaintext) → UDP "28…" to hub
+Layer 1  Matter command   {"2.148.35011.0":""}                          (from RN bundle)
+Layer 2  "lumi" frame      b"lumi" + type(4 LE) + seq(4 LE) + len(4 LE) + payload
+Layer 3a TUTK cipher       ppcs_encrypt(key="aqarakr19kn", plaintext) → "28…" bytes
+Layer 3b TUTK PPPP/UDP     F1 <type> <len:2 BE> <payload>  →  UDP datagram to hub:port
 ```
 
-- **PPCS cipher key** = the part after `:` in `p2p_info().initStringApp`, e.g. `<ppcs-key>`
-  (a second TUTK base key `<tutk-base-key>` is used for the session layer — the CVE-2021-28372
-  Kalay key). Confirmed by hooking `cs2p2p__P2P_Proprietary_Encrypt` (key + plaintext↔ciphertext
-  pairs; the 252-byte login plaintext encrypts to the exact `28d77f…` wire frame).
-- **Login JSON** (`{app_public_key, app_sign, device_id, timestamp}`) — `app_sign` is **issued by
-  the cloud**, NOT computed locally (a Java stacktrace put the builder right after a Retrofit
-  call). Two cloud calls supply everything:
-  - `GET /devex/camera/p2p/info?did=…` → `initStringApp` (=`<init>:<ppcs-key>`), `p2pId`
-    (TUTK DID e.g. `AQARAKR-XXXXXX-XXXXX`), `devP2pPublicKey`.
+Everything below is implemented and unit-verified byte-for-byte against the real capture in
+`custom_components/aquara_local/local.py` (no `.so`, no frida, no phone needed at run time).
+
+**Layer 3a — the cipher (`cs2p2p__P2P_Proprietary_Encrypt`)**, reversed from `libPPCS_API.so`
+(aarch64, fn @`0x192ec`). It's a self-synchronising (CFB-style) stream cipher over a fixed
+256-byte table at file offset `0x10838` (the public "Kalay" constant — embedded as `PPCS_TABLE`):
+
+```
+seeds = [ sum(key)&0xff, (-sum(key))&0xff, (Σ (b*0xAB)>>9)&0xff, (xor key)&0xff ]
+out[0]   = TABLE[ sum(key)&0xff ] ^ in[0]
+out[i>0] = TABLE[ (seeds[fb & 3] + fb) & 0xff ] ^ in[i]      # fb = ciphertext byte i-1
+```
+(decrypt is identical but feeds back the *input* byte.) Key = the part after `:` in
+`p2p_info().initStringApp`, here **`aqarakr19kn`**. The TUTK session-layer base key
+**`SSD@cs2-network.`** (CVE-2021-28372 Kalay default) is a public constant. **Verified 9/9** vs
+captured plaintext↔ciphertext pairs (lengths 4/8/20/24/40), incl. the 252-byte login → exact
+`28d77f766e8d11…` wire frame.
+
+**Layer 3b — the PPPP/Kalay transport** (`PpcsUdpTransport`), decoded from
+`captures/hub/hub_local_udp_session.pcap`. Packet = `F1 <type> <len:2 BE> <payload>`, and **every
+datagram is wrapped by the Layer-3a cipher**. Message types observed/used:
+
+| type | name | direction | notes |
+|------|------|-----------|-------|
+| `0x41` | `MSG_PUNCH_PKT` | app→hub | LAN connect/announce; payload = encoded DID |
+| `0x42`/`0x43` | `MSG_P2P_RDY`/`_ACK` | hub→app | session is up |
+| `0xd0` | `MSG_DRW` | both | reliable data; body `D1 <chan> <index:2 BE> <lumi>` |
+| `0xd1` | `MSG_DRW_ACK` | both | body `D1 <chan> <count:2> <index:2>×count` |
+| `0xe0`/`0xe1` | `MSG_ALIVE`/`_ACK` | both | keepalive |
+| `0xf0` | `MSG_CLOSE` | app→hub | teardown |
+
+- **DID encoding** (`encode_p2p_did`): `AQARAKR-XXXXXX-XXXXX` → `prefix(8B ascii+NUL) ‖ number(4B
+  BE) ‖ suffix(8B ascii+NUL)` = `41514152414b5200 000176bd 4a454e464b000000` (`0x000176bd` = 95933).
+- **Channels**: `0x00` = lumi command/control; `0x04` = bulk data (1032-B frames, e.g. device list).
+- **Handshake**: PUNCH → RDY → `MSG_DRW(chan0, idx0)` = lumi LOGIN (retransmit until DRW_ACK; hub
+  replies lumi `{"code":0,"message":"success"}`) → `MSG_DRW(chan0, idxN)` = lumi Matter command.
+- **Login JSON** `{app_public_key, app_sign, device_id, timestamp}` — `app_sign` is **cloud-issued**
+  (stacktrace put the builder right after a Retrofit call). Two cacheable cloud calls supply it:
+  - `GET /devex/camera/p2p/info?did=…` → `initStringApp` (=`<init>:aqarakr19kn`), `p2pId`
+    (TUTK DID `AQARAKR-XXXXXX-XXXXX`), `devP2pPublicKey` (hub static X25519 pubkey).
   - `POST /devex/camera/p2p/sign {did, p2pAppPublicKey, devPwd:""}` → `{sign}` = `app_sign`.
-- **On the LAN there is no NAT** → none of PPCS's hole-punching / supernode / relay machinery is
-  needed; it's direct UDP to `hub:port`.
+- **On the LAN there is no NAT** → none of PPPP's hole-punching / supernode / relay machinery is
+  needed; direct UDP to `hub:port`.
 
-So a fully-local unlock = 3 cloud calls (cacheable) for the session creds + a PPCS tunnel that
-encrypts the lumi-framed Matter command with key `<ppcs-key>`. Implemented as far as possible
-in `custom_components/aquara_local/local.py`; the remaining piece is a `PpcsTransport` backend
-(the TUTK cipher — callable via frida `NativeFunction`, or reimplemented from the Kalay research).
+**So a fully-local unlock** = 2 cloud calls (cacheable) for the session creds + the pure-Python
+`PpcsUdpTransport` driving the cipher'd PPPP handshake and the lumi Matter command. Code:
+`local.py` (`ppcs_encrypt`, `build_drw`, `encode_p2p_did`, `PpcsUdpTransport`, `prepare_local_session`).
+
+✅ **VERIFIED LIVE (2026-06)** — the D100 physically unlocked over this pure-Python path. The full
+recipe, all confirmed against the real hub:
+1. `did_hub` = the device that owns the P2P stream (here the **G410 doorbell** `lumi.camera.agl006`,
+   not the Zigbee lock — the lock answers `p2p/info` with `code=1730`). Find it by probing `p2p/info`.
+2. `GET /devex/camera/p2p/info?did=did_hub` → `initStringApp` (=`<init>:aqarakr19kn`), `p2pId`.
+3. ephemeral X25519 keypair → `POST /devex/camera/p2p/sign {did_hub, p2pAppPublicKey, devPwd:""}`
+   → `{sign, time}`. **The login `timestamp` MUST equal that `time`** (app_sign covers pubkey+time;
+   a local clock value gets `{"code":-1}`).
+4. **LAN discovery**: send a *ciphered* `MSG_LAN_SEARCH` (`enc(F1 30 0000)`) to `hub:32108`; the hub
+   replies from a **fresh, per-session UDP port** — use that port (a bare PUNCH to 32108 is ignored).
+5. PUNCH that port → ready; `MSG_DRW(chan0, idx0)` = lumi **LOGIN** type 0x1000 → `{"code":0}`.
+6. `MSG_DRW(chan0, idx1)` = lumi **type 0x1020** carrying the cloud `/matter/write` body
+   `{"data":{"2.148.35011.0":""},"did":lock_did,"pwd":"","type":0}` → `{"code":"0"}` and the lock opens.
+   (Only lumi type **0x1020** runs the trait + returns the full RPC `{"state":"end"}`; other types
+   reply `"unsupport cmd"`.)
+
+Test tool: `tools/local_hub_test.py` (`--dry` = login only; `--op open/close`).
 
 ---
 
@@ -208,7 +268,7 @@ adb shell monkey -p com.lumiunited.aqarahome.play 1   # foreground to load class
 - Lock DID `lumi.<LOCK_ID>`; doorbell/P2P DID `lumi3.<P2P_DID>`,
   TUTK `p2pId` `AQARAKR-XXXXXX-XXXXX`.
 - Hub G410 static X25519 pubkey `<hub-x25519-pubkey>`.
-- PPCS keys: `<ppcs-key>` (device channel) + `<tutk-base-key>` (TUTK base / Kalay).
+- PPCS keys: `aqarakr19kn` (device channel) + `SSD@cs2-network.` (TUTK base / Kalay).
 - App creds: `APPID <APPID — see const.py>`, `APPKEY <APPKEY — see const.py>`.
 
 > ⚠️ Keep real DIDs / keys / account out of any public commit; the values above are this test

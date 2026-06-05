@@ -84,10 +84,17 @@ def _find_handle(services, uuid: str) -> int | None:
 class Esp32Lock:
     """Drives the D100 over an ESPHome BLE proxy using raw aioesphomeapi calls."""
 
-    def __init__(self, cli: APIClient, address: int, address_type: int | None) -> None:
+    def __init__(
+        self,
+        cli: APIClient,
+        address: int,
+        address_type: int | None,
+        feature_flags: int = 0,
+    ) -> None:
         self.cli = cli
         self.addr = address
         self.addr_type = address_type
+        self.feature_flags = feature_flags
         self.services = None
         self.h_hs_write: int | None = None
         self.h_hs_notify: int | None = None
@@ -106,8 +113,14 @@ class Esp32Lock:
                 connected.set_exception(RuntimeError(f"connect failed (error={error})"))
 
         _LOG.info("Connecting GATT to %012x (type=%s)…", self.addr, self.addr_type)
+        # esphome 2022.12+ proxies require REMOTE_CACHING; pass the proxy's feature
+        # flags so aioesphomeapi uses CONNECT_V3 (the old CONNECT verb was removed).
         await self.cli.bluetooth_device_connect(
-            self.addr, on_state, timeout=30.0, address_type=self.addr_type
+            self.addr,
+            on_state,
+            timeout=30.0,
+            feature_flags=self.feature_flags,
+            address_type=self.addr_type,
         )
         await asyncio.wait_for(connected, 30.0)
         self.services = await self.cli.bluetooth_gatt_get_services(self.addr)
@@ -217,20 +230,59 @@ class Esp32Lock:
             pass
 
 
-async def discover_address(cli: APIClient, target_mac: int, timeout: float = 30.0):
-    """Subscribe to LE adverts and return (address, address_type) for the lock."""
+def _parse_raw_adv(data: bytes) -> tuple[str | None, list[str]]:
+    """Parse a raw BLE advert payload → (local_name, [service_uuid hex strings])."""
+    name: str | None = None
+    uuids: list[str] = []
+    i = 0
+    while i < len(data):
+        ln = data[i]
+        if ln == 0 or i + 1 + ln > len(data):
+            break
+        ad_type = data[i + 1]
+        val = data[i + 2 : i + 1 + ln]
+        if ad_type in (0x08, 0x09):  # short / complete local name
+            try:
+                name = val.decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001
+                name = repr(val)
+        elif ad_type in (0x02, 0x03):  # 16-bit service UUIDs
+            for j in range(0, len(val) - 1, 2):
+                uuids.append(f"{val[j] | (val[j+1] << 8):04x}")
+        elif ad_type in (0x06, 0x07):  # 128-bit service UUIDs
+            for j in range(0, len(val) - 15, 16):
+                uuids.append(val[j : j + 16][::-1].hex())
+        i += 1 + ln
+    return name, uuids
+
+
+def _reverse_mac_int(mac_int: int) -> int:
+    """Aqara's cloud stores the MAC byte-reversed vs the BLE advert address."""
+    b = mac_int.to_bytes(6, "big")
+    return int.from_bytes(b[::-1], "big")
+
+
+async def discover_address(cli: APIClient, target_mac: int, timeout: float = 60.0):
+    """Subscribe to RAW LE adverts and return (address, address_type) for the lock.
+
+    Matches both the given MAC and its byte-reversed form, because Aqara's cloud
+    reports the lock MAC in reverse byte order relative to the BLE advert address.
+    """
+    targets = {target_mac, _reverse_mac_int(target_mac)}
     loop = asyncio.get_running_loop()
     found: asyncio.Future = loop.create_future()
     seen: set[int] = set()
 
-    def on_adv(adv) -> None:
-        if adv.address not in seen:
-            seen.add(adv.address)
-            _LOG.debug("advert %012x rssi=%s name=%r", adv.address, adv.rssi, adv.name)
-        if adv.address == target_mac and not found.done():
-            found.set_result((adv.address, adv.address_type))
+    def on_resp(resp) -> None:
+        for adv in resp.advertisements:
+            if adv.address not in seen:
+                seen.add(adv.address)
+                name, _ = _parse_raw_adv(bytes(adv.data))
+                _LOG.debug("advert %012x rssi=%s name=%r", adv.address, adv.rssi, name)
+            if adv.address in targets and not found.done():
+                found.set_result((adv.address, adv.address_type))
 
-    unsub = cli.subscribe_bluetooth_le_advertisements(on_adv)
+    unsub = cli.subscribe_bluetooth_le_raw_advertisements(on_resp)
     try:
         return await asyncio.wait_for(found, timeout)
     finally:
@@ -238,14 +290,19 @@ async def discover_address(cli: APIClient, target_mac: int, timeout: float = 30.
 
 
 async def scan_only(cli: APIClient, seconds: float = 20.0) -> None:
-    """List every advert seen — use this to find the lock's MAC."""
+    """List every advert seen (RAW adverts) — use this to find the lock's MAC."""
     rows: dict[int, tuple] = {}
 
-    def on_adv(adv) -> None:
-        rows[adv.address] = (adv.rssi, adv.name, list(adv.service_uuids))
+    def on_resp(resp) -> None:
+        for adv in resp.advertisements:
+            name, uuids = _parse_raw_adv(bytes(adv.data))
+            prev = rows.get(adv.address)
+            # keep the strongest rssi, and a name if we ever saw one
+            keep_name = name or (prev[1] if prev else None)
+            rows[adv.address] = (adv.rssi, keep_name, uuids or (prev[2] if prev else []))
 
-    unsub = cli.subscribe_bluetooth_le_advertisements(on_adv)
-    _LOG.info("Scanning %.0fs … (look for name 'DP1A' / your lock)", seconds)
+    unsub = cli.subscribe_bluetooth_le_raw_advertisements(on_resp)
+    _LOG.info("Scanning %.0fs (raw adverts) … (look for name 'DP1A'/'Aqara'/'lock')", seconds)
     await asyncio.sleep(seconds)
     unsub()
     for addr, (rssi, name, uuids) in sorted(rows.items(), key=lambda x: -x[1][0]):
@@ -309,11 +366,28 @@ async def main() -> int:
             _LOG.info("Lock DID=%s MAC=%s", did, mac)
 
             target = _mac_to_int(mac)
-            addr, addr_type = await discover_address(cli, target)
-            _LOG.info("Lock advert seen ✓ addr=%012x type=%s", addr, addr_type)
-
-            lock = Esp32Lock(cli, addr, addr_type)
-            await lock.connect()
+            flags = getattr(info, "bluetooth_proxy_feature_flags", 0)
+            attempts = int(os.environ.get("BLE_ATTEMPTS", "3"))
+            lock = None
+            for n in range(1, attempts + 1):
+                addr, addr_type = await discover_address(cli, target)
+                _LOG.info(
+                    "Lock advert seen ✓ addr=%012x type=%s (attempt %d/%d)",
+                    addr, addr_type, n, attempts,
+                )
+                lock = Esp32Lock(cli, addr, addr_type, feature_flags=flags)
+                try:
+                    await lock.connect()
+                    break
+                except Exception as err:  # noqa: BLE001
+                    _LOG.warning("connect attempt %d/%d failed: %s", n, attempts, err)
+                    try:
+                        await cli.bluetooth_device_disconnect(addr)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    if n == attempts:
+                        raise
+                    await asyncio.sleep(2)
             try:
                 if args.dry:
                     _LOG.info("--dry: GATT dumped, skipping unlock.")
