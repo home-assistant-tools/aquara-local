@@ -1,0 +1,38 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Tài khoản Aqara D100",
+        "description": "Đăng nhập bằng email và mật khẩu Aqara Home. Khoá sẽ được tự động tìm và thêm vào.",
+        "data": {
+          "email": "Email",
+          "password": "Mật khẩu",
+          "area": "Khu vực máy chủ",
+          "district": "Mã quốc gia/khu vực"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Sai email hoặc mật khẩu.",
+      "cannot_connect": "Không kết nối được tới máy chủ Aqara.",
+      "no_locks": "Không tìm thấy khoá Aqara D100 nào trong tài khoản này.",
+      "unknown": "Lỗi không xác định. Kiểm tra log."
+    },
+    "abort": {
+      "already_configured": "Tài khoản Aqara này đã được thiết lập."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "battery": {
+        "name": "Pin"
+      },
+      "last_event": {
+        "name": "Sự kiện gần nhất"
+      },
+      "credential_count": {
+        "name": "Số credential"
+      }
+    }
+  }
+}

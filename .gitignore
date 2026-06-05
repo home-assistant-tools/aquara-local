@@ -1,0 +1,59 @@
+# ===== Du lieu nhay cam (KHONG commit): token, sessionKey, nonce, RSA blob, MITM flow =====
+captures/
+mitm/
+frida/
+*.token
+*.keystore
+*.jks
+credentials.json
+secrets.json
+.env
+.env.*
+
+# ===== Aqara IP - KHONG phan phoi lai: APK goc, JS bundle, native lib =====
+apk/
+rn_bundle/
+*.so
+*.apk
+*.aab
+
+# ===== Build / phu thuoc =====
+node_modules/
+.claude/
+.venv-frida/
+.expo/
+.gradle/
+.cxx/
+build/
+android/app/build/
+android/build/
+ios/build/
+*.log
+
+# ===== Binary tool nang (frida-server, hluda) =====
+tools/frida-server*
+tools/hluda*
+tools/*.bin
+tools/ble_local_replay.py
+tools/ble_reuse_full_test.py
+
+# ===== Anh / screenshot (tru icon app) =====
+*.png
+*.jpg
+*.jpeg
+!app/assets/*.png
+!app/android/app/src/main/res/mipmap-*/*.png
+
+# ===== Python build cache =====
+__pycache__/
+*.pyc
+
+# ===== Linh tinh =====
+.DS_Store
+*.tmp
+
+# ===== File chua credential that (KHONG commit) =====
+tools/login_plain_test.py
+tools/__pycache__/
+tools/.hluda_path
+captures/rn_bundle/*.bundle

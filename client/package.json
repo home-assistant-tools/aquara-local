@@ -1,0 +1,8 @@
+{
+  "name": "aqara-d100-client",
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Local-control client cho khoá Aqara D100 (TypeScript, reverse-engineered)",
+  "main": "index.ts",
+  "devDependencies": { "typescript": "5.5.4", "@types/node": "20.14.0" }
+}

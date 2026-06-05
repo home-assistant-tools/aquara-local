@@ -1,0 +1,182 @@
+unbolt:
+  name: Unbolt
+  description: Fully retract the bolt (Matter unbolt) through the cloud. No BLE needed.
+  fields:
+    did:
+      name: Lock DID
+      description: The lock's Aqara device id (lumi.xx…). See the device's diagnostics.
+      required: true
+      example: lumi.xxxxxxxxxxxxxxxx
+      selector:
+        text:
+
+identify:
+  name: Identify
+  description: Make the lock beep/flash to locate it (Matter identify). Safe test command.
+  fields:
+    did:
+      name: Lock DID
+      required: true
+      example: lumi.xxxxxxxxxxxxxxxx
+      selector:
+        text:
+
+matter_write:
+  name: Matter write (advanced)
+  description: >-
+    Write a raw Matter DoorLock trait via the cloud. Escape hatch for the
+    not-yet-captured commands (setCredential, setUser, schedules…). See CLOUD_API.md
+    for trait ids. Use with care — wrong values can mis-program the lock.
+  fields:
+    did:
+      name: Lock DID
+      required: true
+      selector:
+        text:
+    trait:
+      name: Trait path
+      description: e.g. 2.148.40031.0 (unbolt), 2.148.40035.0 (setCredential)
+      required: true
+      example: "2.148.40031.0"
+      selector:
+        text:
+    value:
+      name: Value
+      description: Trait value. Empty string for command-style traits like unlock/unbolt.
+      required: false
+      default: ""
+      selector:
+        text:
+
+delete_credential:
+  name: Delete credential
+  description: Remove a credential (PIN/NFC/fingerprint) from the lock by type and value.
+  fields:
+    did:
+      name: Lock DID
+      required: true
+      selector:
+        text:
+    credential_type:
+      name: Credential type
+      description: 1=fingerprint 2=password 3=NFC 4=eKey/BLE 5=temp-password 6=face 7=NFC-tag
+      required: true
+      example: 2
+      selector:
+        number:
+          min: 1
+          max: 7
+          mode: box
+    type_value:
+      name: Credential value/id
+      description: The credential's typeValue (from the credential list / sensor attributes).
+      required: true
+      selector:
+        text:
+
+set_credential_validity:
+  name: Set credential validity
+  description: Disable or re-enable a credential by setting its validity window.
+  fields:
+    did:
+      name: Lock DID
+      required: true
+      selector:
+        text:
+    credential_type:
+      name: Credential type
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 7
+          mode: box
+    type_value:
+      name: Credential value/id
+      required: true
+      selector:
+        text:
+    type_group_id:
+      name: Group id
+      required: true
+      selector:
+        text:
+    type_name:
+      name: Credential name
+      required: false
+      selector:
+        text:
+    valid_range:
+      name: Valid range
+      description: Aqara validRange string. Past deadline disables; open-ended re-enables.
+      required: false
+      selector:
+        text:
+
+create_user_group:
+  name: Create user group
+  description: Create a lock user group (cloud mirror).
+  fields:
+    did:
+      name: Lock DID
+      required: true
+      selector:
+        text:
+    type_group_id:
+      name: Group id
+      required: true
+      selector:
+        text:
+    group_name:
+      name: Group name
+      required: true
+      selector:
+        text:
+    type_group:
+      name: Group kind
+      description: "3=scheduled, 2=normal"
+      required: false
+      default: "3"
+      selector:
+        text:
+
+delete_user_group:
+  name: Delete user group
+  description: Remove a lock user group (cloud mirror).
+  fields:
+    did:
+      name: Lock DID
+      required: true
+      selector:
+        text:
+    type_group_id:
+      name: Group id
+      required: true
+      selector:
+        text:
+
+rename_user_group:
+  name: Rename user group
+  description: Rename a lock user group.
+  fields:
+    did:
+      name: Lock DID
+      required: true
+      selector:
+        text:
+    type_group_id:
+      name: Group id
+      required: true
+      selector:
+        text:
+    group_name:
+      name: New name
+      required: true
+      selector:
+        text:
+    type_group:
+      name: Group kind
+      required: false
+      default: "3"
+      selector:
+        text:

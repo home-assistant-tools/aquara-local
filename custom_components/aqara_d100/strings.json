@@ -1,0 +1,38 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Aqara D100 account",
+        "description": "Sign in with your Aqara Home email and password. Locks are discovered automatically.",
+        "data": {
+          "email": "Email",
+          "password": "Password",
+          "area": "Server region",
+          "district": "District code"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid email or password.",
+      "cannot_connect": "Could not reach the Aqara cloud.",
+      "no_locks": "No Aqara D100 lock was found on this account.",
+      "unknown": "Unexpected error. Check the logs."
+    },
+    "abort": {
+      "already_configured": "This Aqara account is already set up."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "battery": {
+        "name": "Battery"
+      },
+      "last_event": {
+        "name": "Last event"
+      },
+      "credential_count": {
+        "name": "Credentials"
+      }
+    }
+  }
+}

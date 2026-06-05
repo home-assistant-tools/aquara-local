@@ -1,0 +1,67 @@
+# ESPHome Bluetooth proxy for the Aqara D100 — đặt SÁT cửa khoá.
+#
+# Flash:   esphome run tools/esp32-d100-proxy.yaml
+# (lần đầu cắm ESP32 vào máy qua USB; các lần sau OTA qua WiFi.)
+#
+# Sau khi flash xong, dùng được 2 đường:
+#   • Thêm vào Home Assistant qua tích hợp ESPHome — production.
+#   • Test trực tiếp qua LAN: ESP32_HOST=<ip>  ESP32_NOISE_PSK=<key bạn tự sinh>.
+#
+# YÊU CẦU: phải là ESP32 THẬT (không phải ESP8266/Beken CB3S — mấy con đó không có
+# bluetooth_proxy). `active: true` để central tạo được kết nối GATT ra (mở khoá).
+
+substitutions:
+  name: d100-proxy
+  friendly_name: "D100 BLE Proxy"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32dev          # ESP32-WROOM phổ biến. Đổi theo board của bạn:
+                           #   ESP32-C3 → esp32-c3-devkitm-1
+                           #   ESP32-S3 → esp32-s3-devkitc-1
+                           #   ESP32-WROVER → esp-wrover-kit
+  framework:
+    type: esp-idf          # esp-idf cho phép nhiều kết nối BLE đồng thời hơn
+
+logger:
+  level: INFO              # đổi DEBUG khi cần soi sóng khoá
+
+# API native — cả Home Assistant lẫn script test đều dùng cổng này (6053).
+api:
+  encryption:
+    # ⚠️ TỰ SINH key riêng (đừng dùng key mẫu công khai):
+    #   openssl rand -base64 32        (hoặc nút "Generate" trong ESPHome dashboard)
+    key: "REPLACE_WITH_YOUR_OWN_NOISE_PSK"   # = ESP32_NOISE_PSK
+
+ota:
+  - platform: esphome
+    password: "REPLACE_WITH_OTA_PASSWORD"
+
+wifi:
+  ssid: "TÊN_WIFI_NHÀ_BẠN"           # ⚠️ điền WiFi nhà bạn (cùng mạng với HA)
+  password: "MẬT_KHẨU_WIFI"
+  # IP tĩnh (tùy chọn — bỏ cả khối nếu muốn DHCP). Sửa theo subnet của bạn:
+  # manual_ip:
+  #   static_ip: 192.168.1.50
+  #   gateway: 192.168.1.1
+  #   subnet: 255.255.255.0
+  # Hotspot dự phòng nếu không nối được WiFi:
+  ap:
+    ssid: "${friendly_name} Fallback"
+    password: "REPLACE_WITH_AP_PASSWORD"
+
+captive_portal:
+
+# Lắng nghe quảng bá BLE — interval≈window để nghe gần như liên tục (advert khoá thưa).
+esp32_ble_tracker:
+  scan_parameters:
+    active: true
+    interval: 1100ms
+    window: 1100ms
+
+# Cho phép HA/central kết nối GATT ra ngoài (BẮT BUỘC để mở khoá, không chỉ đọc advert).
+bluetooth_proxy:
+  active: true
