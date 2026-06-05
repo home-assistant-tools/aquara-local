@@ -1,14 +1,14 @@
 {
   "expo": {
-    "name": "D100 Unlock",
-    "slug": "d100-unlock",
-    "version": "1.0.0",
+    "name": "Aquara BLE",
+    "slug": "aquara-ble",
+    "version": "1.1.0",
     "orientation": "portrait",
-    "scheme": "d100unlock",
+    "scheme": "aquarable",
     "userInterfaceStyle": "light",
     "icon": "./assets/icon.png",
     "android": {
-      "package": "com.example.d100unlock",
+      "package": "com.duongvanba.aquara_ble",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#e8f0ff"

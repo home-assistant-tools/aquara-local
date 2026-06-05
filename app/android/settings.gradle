@@ -44,7 +44,7 @@ if (getRNMinorVersion() >= 75) {
   }
 }
 
-rootProject.name = 'D100 Unlock'
+rootProject.name = 'Aquara BLE'
 
 dependencyResolutionManagement {
   versionCatalogs {

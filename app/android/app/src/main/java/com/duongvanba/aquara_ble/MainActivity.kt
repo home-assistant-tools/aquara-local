@@ -1,4 +1,4 @@
-package com.example.d100unlock
+package com.duongvanba.aquara_ble
 
 import android.os.Build
 import android.os.Bundle
