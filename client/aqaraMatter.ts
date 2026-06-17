@@ -422,9 +422,10 @@ export class AqaraMatterCloud {
     return out;
   }
 
-  /** GET /dev/signals/detail/list/query → [{id, name}] (id→tên signal, cho sync). */
+  /** GET /dev/signals/detail/list/query → [{id, name}] (id→tên signal, cho sync).
+   *  ⚠️ KHÔNG gửi param `filter` (gây code=106). */
   async getSignalDetails(positionId: string): Promise<Array<{ id: string; name: string }>> {
-    const r = await this.cloud.get<any>("/dev/signals/detail/list/query", { positionId, filter: 4 });
+    const r = await this.cloud.get<any>("/dev/signals/detail/list/query", { positionId });
     const ev = r?.events ?? r?.result?.events ?? [];
     return ev.map((e: any) => ({ id: e.id, name: e.name }));
   }
