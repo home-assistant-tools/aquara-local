@@ -1,0 +1,18 @@
+name: Aquara Matter
+version: "0.1.0"
+slug: aquara_matter
+description: Đăng nhập Aqara Home, xem & điều khiển khóa cửa realtime (UI Remix v2 + SSE)
+url: https://github.com/duongvanba/aquara-local
+arch:
+  - aarch64
+  - amd64
+init: false
+ports:
+  "7654/tcp": 7654
+ports_description:
+  "7654/tcp": Giao diện web Aquara Matter
+webui: "http://[HOST]:[PORT:7654]"
+options:
+  session_secret: ""
+schema:
+  session_secret: str?

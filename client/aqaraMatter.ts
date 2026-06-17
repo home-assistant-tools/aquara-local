@@ -42,6 +42,47 @@ export function nodeIdHexToDecimal(hex: string): string {
 export class AqaraMatterCloud {
   constructor(private readonly cloud: AquaraMobileClient) {}
 
+  // ---- discovery + điều khiển cloud (cho UI addon) -------------------------
+  /** Liệt kê khóa của account (mọi home). did/name/model + room + home + hub cha. */
+  async discoverLocks(): Promise<
+    Array<{ did: string; name: string; model: string; roomPositionId: string; homePositionId: string; parentDeviceId: string }>
+  > {
+    const home = await this.cloud.get<any>("/app/position/query/home/list", { needDefaultRoom: "false", size: 300, startIndex: 0 });
+    const homes = home?.homes ?? home?.result?.homes ?? [];
+    const out: any[] = [];
+    for (const h of homes) {
+      const homePid = h.positionId ?? h.homeId;
+      const dev = await this.cloud.get<any>("/app/position/device/query", { positionId: homePid, size: 300, startIndex: 0 });
+      const list = dev?.devices ?? dev?.data ?? dev?.result?.devices ?? [];
+      for (const d of list) {
+        const model = String(d.model ?? "");
+        if (["aqara.lock.aqgl01", "aqgl", "dp1a", ".lock."].some((m) => model.toLowerCase().includes(m)))
+          out.push({
+            did: d.did ?? d.subjectId,
+            name: d.deviceName ?? d.name ?? "Door Lock",
+            model,
+            roomPositionId: d.positionId ?? homePid,
+            homePositionId: homePid,
+            parentDeviceId: d.parentDeviceId ?? "",
+          });
+      }
+    }
+    return out;
+  }
+
+  // Matter DoorLock trait (cloud → hub → Zigbee, KHÔNG cần BLE). ✅ verified.
+  private async matterWrite(did: string, trait: string, value: any = ""): Promise<void> {
+    await this.cloud.post("/matter/write", { data: { [trait]: value }, did, pwd: "", type: 0 });
+  }
+  /** Mở khóa từ xa (Matter unlockDoor 2.148.35011). */
+  async remoteUnlock(lockDid: string): Promise<void> {
+    await this.matterWrite(lockDid, "2.148.35011.0");
+  }
+  /** Khóa lại (Matter lockDoor 2.148.35010). */
+  async remoteLock(lockDid: string): Promise<void> {
+    await this.matterWrite(lockDid, "2.148.35010.0");
+  }
+
   // ---- 1) Fabric của account (ICAC cert+key để ký NOC local) ----------------
   // GET /user/cert/matter/home/list?positionId=<home pid>
   // result[]: entry có privateKey+ipk+fabricId = ICAC; entry rcacId==authorityKeyId = RCAC.
