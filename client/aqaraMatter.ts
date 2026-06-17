@@ -401,10 +401,32 @@ export class AqaraMatterCloud {
   // Luồng: getLockTriggerEvents → createSignal(mỗi event/credential) → syncSignalsToMatter.
   // → xuất MỌI tín hiệu khóa (gồm AI mở: mỗi vân tay/NFC/người = 1 occupancy sensor Matter).
   // ======================================================================
-  /** GET /ifttt/subject/trigger/query → catalog event khóa (TD.unlock_someone_{fing,nfc,password,indoor,away,emergency,...}). */
-  async getLockTriggerEvents(lockDid: string): Promise<any[]> {
+  /**
+   * GET /ifttt/subject/trigger/query → catalog event khóa.
+   * Response là object `{"":[...], <model>:[...], <did>:[...]}`; mỗi item có
+   * `triggerDefinitionId` (TD.unlock_someone_{fing,nfc,password,indoor,away,emergency,...}),
+   * `triggerName`, `group`. Trả mảng phẳng các event (unique theo triggerDefinitionId).
+   */
+  async getLockTriggerEvents(lockDid: string): Promise<Array<{ triggerDefinitionId: string; triggerName: string; group: string }>> {
     const r = await this.cloud.get<any>("/ifttt/subject/trigger/query", { applicationSide: 1, subjectId: lockDid });
-    return Array.isArray(r) ? r : r?.data ?? r?.triggers ?? [];
+    const arrs: any[] = Array.isArray(r) ? r : Object.values(r ?? {}).filter(Array.isArray).flat();
+    const seen = new Set<string>();
+    const out: any[] = [];
+    for (const e of arrs) {
+      const td = e?.triggerDefinitionId;
+      if (td && !seen.has(td)) {
+        seen.add(td);
+        out.push({ triggerDefinitionId: td, triggerName: e.triggerName ?? td, group: e.group ?? "" });
+      }
+    }
+    return out;
+  }
+
+  /** GET /dev/signals/detail/list/query → [{id, name}] (id→tên signal, cho sync). */
+  async getSignalDetails(positionId: string): Promise<Array<{ id: string; name: string }>> {
+    const r = await this.cloud.get<any>("/dev/signals/detail/list/query", { positionId, filter: 4 });
+    const ev = r?.events ?? r?.result?.events ?? [];
+    return ev.map((e: any) => ({ id: e.id, name: e.name }));
   }
 
   /**
@@ -488,6 +510,18 @@ export class AqaraMatterCloud {
   async deleteSignals(signalIds: string[], positionId: string): Promise<void> {
     if (!signalIds.length) return;
     await this.cloud.post("/dev/signals/delete", { data: signalIds, positionId });
+  }
+
+  /** Dò hub Matter-bridge trong 1 home (gateway nào đọc được resource 13.202.85). */
+  async findMatterBridgeHub(positionId: string): Promise<{ did: string; name: string } | null> {
+    const dev = await this.cloud.get<any>("/app/position/device/query", { positionId, size: 300, startIndex: 0 });
+    const list = dev?.devices ?? dev?.data ?? dev?.result?.devices ?? [];
+    const gateways = list.filter((d: any) => /gateway|camera|hub/i.test(String(d.model ?? "")));
+    for (const g of gateways) {
+      const did = g.did ?? g.subjectId;
+      if (await this.isMatterBridgeHub(did)) return { did, name: g.deviceName ?? g.name ?? did };
+    }
+    return null;
   }
 
   async isMatterBridgeHub(hubDid: string): Promise<boolean> {

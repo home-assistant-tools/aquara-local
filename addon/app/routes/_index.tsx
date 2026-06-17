@@ -3,6 +3,53 @@ import { Form, useFetcher, useLoaderData, useRevalidator } from "@remix-run/reac
 import { useEffect, useRef, useState } from "react";
 import { requireAuth } from "~/lib/session.server";
 import { cloudFor, lockView, type LockView } from "~/lib/aqara.server";
+import type { MatterSetupResult } from "~/lib/matterSetup.server";
+
+function MatterCard() {
+  const fx = useFetcher<{ ok?: boolean; result?: MatterSetupResult[]; error?: string }>();
+  const started = useRef(false);
+  useEffect(() => {
+    if (started.current) return;
+    started.current = true;
+    fx.submit({ force: "0" }, { method: "post", action: "/api/matter-setup" }); // tự động khi mở
+  }, []);
+  const busy = fx.state !== "idle";
+  const res = fx.data?.result;
+  const totalSynced = res?.reduce((a, r) => a + r.signalsSynced, 0) ?? 0;
+  const totalCreated = res?.reduce((a, r) => a + r.signalsCreated, 0) ?? 0;
+  const code = res?.find((r) => r.pairingCode)?.pairingCode;
+  return (
+    <div className="card" style={{ borderColor: "#2d3a55" }}>
+      <div className="lockhead">
+        <span className="nm">🔗 Kết nối Matter</span>
+        <span className="live">{busy ? <span className="spin" /> : null} {busy ? "đang đồng bộ…" : res ? "đã đồng bộ" : "—"}</span>
+      </div>
+      {!res && busy && <p className="muted" style={{ marginBottom: 0 }}>Đang tự động tạo + đồng bộ tín hiệu khóa ra Matter…</p>}
+      {fx.data?.error && <div className="err" style={{ marginTop: 10 }}>{fx.data.error}</div>}
+      {res && (
+        <>
+          <div className="badges">
+            <span className="badge">Đồng bộ ra Matter <b>{totalSynced}</b> tín hiệu</span>
+            {totalCreated > 0 && <span className="badge">Tạo mới <b>{totalCreated}</b></span>}
+            {res[0]?.bridgeName && <span className="badge muted">bridge: {res[0].bridgeName}</span>}
+          </div>
+          {code && (
+            <div style={{ marginTop: 8 }}>
+              <div className="muted" style={{ fontSize: 12 }}>Mã ghép Matter cho Home Assistant (Add device → Matter):</div>
+              <code style={{ fontSize: 18, letterSpacing: 1, color: "var(--ac)" }}>{code.replace(/(\d{4})(\d{3})(\d{4})/, "$1-$2-$3")}</code>
+            </div>
+          )}
+          {res.some((r) => r.error) && <div className="err" style={{ marginTop: 8 }}>{res.find((r) => r.error)?.error}</div>}
+        </>
+      )}
+      <div className="row">
+        <button type="button" disabled={busy} onClick={() => fx.submit({ force: "1" }, { method: "post", action: "/api/matter-setup" })}>
+          {busy ? "Đang chạy…" : "↻ Đồng bộ lại toàn bộ tín hiệu"}
+        </button>
+      </div>
+    </div>
+  );
+}
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const auth = await requireAuth(request);
@@ -116,6 +163,8 @@ export default function Dashboard() {
           </Form>
         </span>
       </div>
+
+      <MatterCard />
 
       {locks.length === 0 ? (
         <div className="card muted">
