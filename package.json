@@ -1,0 +1,11 @@
+{
+  "name": "d100-root",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "@matter/main": "^0.17.1",
+    "@matter/nodejs": "^0.17.1",
+    "@noble/ciphers": "^2.2.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}

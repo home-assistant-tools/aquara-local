@@ -1,0 +1,38 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "d100-root",
+      "dependencies": {
+        "@matter/main": "^0.17.1",
+        "@matter/nodejs": "^0.17.1",
+        "@noble/ciphers": "^2.2.0",
+        "qrcode-terminal": "^0.12.0",
+      },
+    },
+  },
+  "packages": {
+    "@matter/general": ["@matter/general@0.17.1", "", { "dependencies": { "@noble/curves": "^2.2.0" } }, "sha512-ImAchtIK8fRiNr5uRTeBFG6qNOb1TbZLhTuj4iYdO+KN1/Uf+GY/3cQhmwGGv1sfIrHBcRKLyBy8SH1S4bvPhg=="],
+
+    "@matter/main": ["@matter/main@0.17.1", "", { "dependencies": { "@matter/general": "0.17.1", "@matter/model": "0.17.1", "@matter/node": "0.17.1", "@matter/protocol": "0.17.1", "@matter/types": "0.17.1" }, "optionalDependencies": { "@matter/nodejs": "0.17.1" } }, "sha512-3CtsEfgpuaIWytfKJaA/92zF4OuNc4SMq43TqtbrkpazZ380HA3kKSECohhgaIlh72v6565ZAAoWuI/iZF0Baw=="],
+
+    "@matter/model": ["@matter/model@0.17.1", "", { "dependencies": { "@matter/general": "0.17.1" } }, "sha512-lW8p8J02MXRuijDFZXf+o2TsyYjkYq6hf2CC2WudZ4gbVQQHQB85XWj+MEQMUtNQk9FzcYZSDUnBL4q1E0Z9pw=="],
+
+    "@matter/node": ["@matter/node@0.17.1", "", { "dependencies": { "@matter/general": "0.17.1", "@matter/model": "0.17.1", "@matter/protocol": "0.17.1", "@matter/types": "0.17.1" } }, "sha512-+0RzbqqxitjtYp33k6HOd/3JNd9odZoMm3kpofxdX+oaJiOOqDWeZr3I6+OjuiSOisGS3U87FJ4lN73/u3SK3A=="],
+
+    "@matter/nodejs": ["@matter/nodejs@0.17.1", "", { "dependencies": { "@matter/general": "0.17.1", "@matter/node": "0.17.1", "@matter/protocol": "0.17.1", "@matter/types": "0.17.1" } }, "sha512-nYHfMaGqDvbLVDci5F8zRxOxh+jglF2ssWu0PkGx3C/23ON7Wlt4bcuvI0arq4xi9e3EDSDfZmGLh6RF1JuX5g=="],
+
+    "@matter/protocol": ["@matter/protocol@0.17.1", "", { "dependencies": { "@matter/general": "0.17.1", "@matter/model": "0.17.1", "@matter/types": "0.17.1" } }, "sha512-7MbNzcxMojqLavBiv8wYZ6pQz/uYch+oWyRpclBeSpW6hYjgZQVXWKY2OYhFpr8rJd0BhQNc3xPGkVSd+VwSnA=="],
+
+    "@matter/types": ["@matter/types@0.17.1", "", { "dependencies": { "@matter/general": "0.17.1", "@matter/model": "0.17.1" } }, "sha512-DaqwpWl8Xayl05QqCRK2TPqvyuswELLbdCUD1H3R4CG2fvOAJqocGn/fu0q9mtAUEhHxuz2MgyLryRMIH6CNLw=="],
+
+    "@noble/ciphers": ["@noble/ciphers@2.2.0", "", {}, "sha512-Z6pjIZ/8IJcCGzb2S/0Px5J81yij85xASuk1teLNeg75bfT07MV3a/O2Mtn1I2se43k3lkVEcFaR10N4cgQcZA=="],
+
+    "@noble/curves": ["@noble/curves@2.2.0", "", { "dependencies": { "@noble/hashes": "2.2.0" } }, "sha512-T/BoHgFXirb0ENSPBquzX0rcjXeM6Lo892a2jlYJkqk83LqZx0l1Of7DzlKJ6jkpvMrkHSnAcgb5JegL8SeIkQ=="],
+
+    "@noble/hashes": ["@noble/hashes@2.2.0", "", {}, "sha512-IYqDGiTXab6FniAgnSdZwgWbomxpy9FtYvLKs7wCUs2a8RkITG+DFGO1DM9cr+E3/RgADRpFjrKVaJ1z6sjtEg=="],
+
+    "qrcode-terminal": ["qrcode-terminal@0.12.0", "", { "bin": { "qrcode-terminal": "./bin/qrcode-terminal.js" } }, "sha512-EXtzRZmC+YGmGlDFbXKxQiMZNwCLEO6BANKXG4iCtSIM0yqc/pappSx3RIKr4r0uh5JsBckOXeKrB3Iz7mdQpQ=="],
+  }
+}

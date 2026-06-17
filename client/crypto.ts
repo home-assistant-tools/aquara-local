@@ -125,6 +125,9 @@ export const NodeAesCcm: AesCcm = {
   decrypt: (key, nonce, ctTag) => aesCcmDecrypt(key, nonce, ctTag),
 };
 
+/** Alias: vector verified TS-native impl as the "native" choice — same behavior as NodeAesCcm. */
+export const NativeAesCcm: AesCcm = NodeAesCcm;
+
 // ===========================================================================
 // 3) `x-aes128gcm` cho login/refresh — ⚠️ CHƯA HOÀN CHỈNH
 //    Wire format ĐÃ biết: base64(IV) + '-' + base64(ciphertext) + '-' + base64(tag16).

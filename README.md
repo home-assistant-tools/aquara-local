@@ -128,6 +128,11 @@ automation:
 
 ## Documentation
 
+- **[docs/MATTER_ADDON.md](docs/MATTER_ADDON.md)** — **software-only Matter path** (no BLE/Zigbee
+  intervention): unlock via a virtual Matter switch + hub automation, and **100%-automatic
+  signal-export** (every lock event/credential → a Matter sensor, incl. "who opened"). Full cloud
+  API reference (commission, automation, signal-export), matter.js auto-commission, and the
+  WebView-MITM technique.
 - **[docs/API.md](docs/API.md)** — full technical API reference (cloud + BLE).
 - **[docs/REVERSE_ENGINEERING.md](docs/REVERSE_ENGINEERING.md)** — the complete reverse-engineering
   journey: every tool used, the SecNeo anti-frida bypass, BLE/cloud/local protocol breakdowns,

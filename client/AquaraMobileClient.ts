@@ -1,7 +1,7 @@
 import { APPID, APPKEY, CLOUD_HOSTS, API_PREFIX, UUID } from "./constants";
 import { aqaraSign, randomNonce, XAes128Gcm, type KeyIvDeriver } from "./crypto";
-import { hexToBytes, bytesToHex, concatBytes } from "./hex";
-import { fragment, Reassembler } from "./framing";
+import { hexToBytes, bytesToHex } from "./hex";
+import { buildAiotFrames, Reassembler, extractPublicKey } from "./framing";
 import type { BleClient } from "./BleClient";
 
 export interface MobileClientConfig {
@@ -23,16 +23,23 @@ export interface LockSessionKey {
   nonce: Uint8Array; // 13B
   mac: string;
   verifyData: Uint8Array; // 8B
+  cloudPublicKey?: string; // hex — lưu để cache/replay offline
+  devicePublicKey?: string; // hex — khoá tra cứu cache (đổi = khoá xoay key)
 }
 
+// Khớp 1:1 header app Aqara thật 6.3.1 (bắt qua MITM). `sign` KHÔNG ký các header này nên
+// thêm an toàn. Một số endpoint mới (matter signals) GATE theo app-version → phải đúng 6.3.1.
+// phoneid/clientid là per-cài-đặt; truyền qua extraHeaders cho từng account/thiết bị.
 const DEFAULT_HEADERS: Record<string, string> = {
-  lang: "en",
-  cuty: "",
-  "app-version": "6.1.6",
-  "phone-model": "RN-D100",
+  lang: "vi",
+  cuty: "VN",
+  "app-version": "6.3.1",
+  "phone-model": "SM-M115F##Mobile",
   "sys-type": "1", // android
   "sys-version": "14",
   "content-type": "application/json; charset=utf-8",
+  "accept-encoding": "gzip",
+  "user-agent": "okhttp/4.12.0",
 };
 
 export class AquaraMobileClient {
@@ -173,7 +180,11 @@ export class AquaraMobileClient {
     );
     // 2) BLE: connect + gửi cloudPublicKey qua packCmd 0610, đọc devicePublicKey
     await ble.connect(pk.mac);
-    const devicePublicKey = await this.bleHandshakeExchange(ble, 0x0610, hexToBytes(pk.cloudPublicKey));
+    const reply0610 = await this.bleHandshakeExchange(ble, 0x0610, hexToBytes(pk.cloudPublicKey));
+    // Reply 0610 có wrapper bytes; bóc 65-byte uncompressed P-256 pubkey (bắt đầu 0x04).
+    const devicePublicKey = extractPublicKey(reply0610);
+    console.log(`  [hs] 0610 reply blob len=${reply0610.length}  hex=${bytesToHex(reply0610)}`);
+    console.log(`  [hs] extracted devicePK len=${devicePublicKey.length}  hex=${bytesToHex(devicePublicKey)}`);
     // 3) verify → sessionKey/nonce/verifyData
     const v = await this.post<{ sessionKey: string; nonce: string; verifyData: string; mac: string }>(
       "/dev/bluetooth/login/assure/verify",
@@ -186,25 +197,61 @@ export class AquaraMobileClient {
       nonce: hexToBytes(v.nonce),
       verifyData: hexToBytes(v.verifyData),
       mac: v.mac,
+      cloudPublicKey: pk.cloudPublicKey,
+      devicePublicKey: bytesToHex(devicePublicKey),
     };
   }
 
-  /** Gửi 1 packCmd + data trên kênh handshake ffb1, ghép notify trả về (da…ff). */
+  /**
+   * Cached-replay handshake — KHÔNG gọi cloud (offline). Connect + replay 0610 với cloudPublicKey đã cache.
+   * Khoá trả CÙNG devicePublicKey (chưa xoay key) → session cũ còn valid → replay 0710 verifyData → trả key.
+   * devicePublicKey KHÁC → trả null (cache stale → caller phải handshake cloud lại).
+   * Không dùng token/cloud → có thể gọi trên instance khởi tạo với token rỗng.
+   */
+  async replaySession(
+    cached: {
+      cloudPublicKey: string;
+      devicePublicKey: string;
+      sessionKey: string;
+      nonce: string;
+      verifyData: string;
+      mac: string;
+    },
+    ble: BleClient,
+  ): Promise<LockSessionKey | null> {
+    await ble.connect(cached.mac);
+    const reply = await this.bleHandshakeExchange(ble, 0x0610, hexToBytes(cached.cloudPublicKey));
+    const dpk = bytesToHex(extractPublicKey(reply));
+    if (dpk.toLowerCase() !== cached.devicePublicKey.toLowerCase()) return null; // khoá đã xoay key
+    await this.bleHandshakeExchange(ble, 0x0710, hexToBytes(cached.verifyData)).catch(() => void 0);
+    return {
+      sessionKey: hexToBytes(cached.sessionKey),
+      nonce: hexToBytes(cached.nonce),
+      verifyData: hexToBytes(cached.verifyData),
+      mac: cached.mac,
+      cloudPublicKey: cached.cloudPublicKey,
+      devicePublicKey: cached.devicePublicKey,
+    };
+  }
+
+  /** Gửi 1 packCmd + data trên kênh handshake ffb1, ghép notify trả về (da…ff).
+   *  Dùng `buildAiotFrames` (có HEADER frame với CRC16-ARC) — KHÔNG dùng `fragment()` raw,
+   *  vì khoá D100 reject nếu không thấy header frame trước. */
   private async bleHandshakeExchange(ble: BleClient, packCmd: number, data: Uint8Array): Promise<Uint8Array> {
-    const payload = concatBytes((packCmd >> 8) & 0xff, packCmd & 0xff, data); // [packCmd 2B][data]
     const reasm = new Reassembler();
     return new Promise<Uint8Array>(async (resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("handshake timeout")), 8000);
+      const timer = setTimeout(() => reject(new Error("handshake timeout")), 9000);
       const unsub = await ble.listen(UUID.HANDSHAKE_NOTIFY, (pkt) => {
         const full = reasm.push(pkt);
         if (full) {
           clearTimeout(timer);
           unsub();
-          // TODO(RE): bóc status/echo packCmd; tạm trả nguyên payload đã ghép.
           resolve(full);
         }
       });
-      for (const chunk of fragment(payload)) await ble.send(UUID.HANDSHAKE_WRITE, chunk);
+      for (const chunk of buildAiotFrames(packCmd, data)) {
+        await ble.send(UUID.HANDSHAKE_WRITE, chunk);
+      }
     });
   }
 }
