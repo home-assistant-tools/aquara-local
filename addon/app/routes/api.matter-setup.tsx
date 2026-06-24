@@ -15,7 +15,7 @@ export async function action({ request }: ActionFunctionArgs) {
   const fd = await request.formData().catch(() => null);
   const force = fd?.get("force") === "1";
   try {
-    const result = await runMatterSetup(auth, { createIfEmpty: true, force });
+    const result = await runMatterSetup(auth, { force });
     return Response.json({ ok: true, result });
   } catch (e: any) {
     return Response.json({ ok: false, error: e?.message?.slice(0, 160) || "lỗi" }, { status: 502 });

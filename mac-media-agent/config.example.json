@@ -1,0 +1,16 @@
+{
+  "mqtt": {
+    "host": "192.168.2.4",
+    "port": 1883,
+    "username": "mqtt",
+    "password": "CHANGE_ME"
+  },
+  "node_id": "macmini_ba",
+  "name": "Mac mini của Ba",
+  "vlc": "/Applications/VLC.app/Contents/MacOS/VLC",
+  "m1ddc": "/opt/homebrew/bin/m1ddc",
+  "brightness_displays": [1, 2],
+  "cameras": [
+    { "name": "Chuông cửa", "url": "rtsp://user:pass@192.168.2.105:8554/ch1" }
+  ]
+}

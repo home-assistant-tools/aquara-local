@@ -2,9 +2,11 @@ import { type ActionFunctionArgs, type LoaderFunctionArgs, redirect } from "@rem
 import { Form, useActionData, useNavigation } from "@remix-run/react";
 import { getAuth, createUserSession } from "~/lib/session.server";
 import { login } from "~/lib/aqara.server";
+import { kickBootstrap } from "~/lib/bootstrap.server";
 import { REGIONS } from "~/lib/regions";
 
 export async function loader({ request }: LoaderFunctionArgs) {
+  kickBootstrap(); // headless setup chạy nền khi addon được truy cập lần đầu (env creds)
   if (await getAuth(request)) throw redirect("/");
   return null;
 }

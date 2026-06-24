@@ -113,16 +113,18 @@ class Esp32Lock:
                 connected.set_exception(RuntimeError(f"connect failed (error={error})"))
 
         _LOG.info("Connecting GATT to %012x (type=%s)…", self.addr, self.addr_type)
-        # esphome 2022.12+ proxies require REMOTE_CACHING; pass the proxy's feature
-        # flags so aioesphomeapi uses CONNECT_V3 (the old CONNECT verb was removed).
+        # Short timeout — mimic BlePlxClient (Android-LowLatency duty 100% wins by
+        # catching ADV_IND frames that the lock interleaves between ADV_NONCONN_IND).
+        # Tunable via BLE_CONNECT_TIMEOUT env.
+        connect_to = float(os.environ.get("BLE_CONNECT_TIMEOUT", "3.0"))
         await self.cli.bluetooth_device_connect(
             self.addr,
             on_state,
-            timeout=30.0,
+            timeout=connect_to,
             feature_flags=self.feature_flags,
             address_type=self.addr_type,
         )
-        await asyncio.wait_for(connected, 30.0)
+        await asyncio.wait_for(connected, connect_to)
         self.services = await self.cli.bluetooth_gatt_get_services(self.addr)
         self._map_handles()
 
@@ -367,7 +369,7 @@ async def main() -> int:
 
             target = _mac_to_int(mac)
             flags = getattr(info, "bluetooth_proxy_feature_flags", 0)
-            attempts = int(os.environ.get("BLE_ATTEMPTS", "3"))
+            attempts = int(os.environ.get("BLE_ATTEMPTS", "25"))
             lock = None
             for n in range(1, attempts + 1):
                 addr, addr_type = await discover_address(cli, target)
@@ -387,7 +389,7 @@ async def main() -> int:
                         pass
                     if n == attempts:
                         raise
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(0.5)
             try:
                 if args.dry:
                     _LOG.info("--dry: GATT dumped, skipping unlock.")

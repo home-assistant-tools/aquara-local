@@ -15,27 +15,35 @@ function MatterCard() {
   }, []);
   const busy = fx.state !== "idle";
   const res = fx.data?.result;
-  const totalSynced = res?.reduce((a, r) => a + r.signalsSynced, 0) ?? 0;
-  const totalCreated = res?.reduce((a, r) => a + r.signalsCreated, 0) ?? 0;
-  const code = res?.find((r) => r.pairingCode)?.pairingCode;
+  const totalAutomations = res?.reduce((a, r) => a + r.automationsCreated, 0) ?? 0;
+  const code = res?.find((r) => r.light?.manualPairingCode)?.light.manualPairingCode;
   return (
     <div className="card" style={{ borderColor: "#2d3a55" }}>
       <div className="lockhead">
         <span className="nm">🔗 Kết nối Matter</span>
         <span className="live">{busy ? <span className="spin" /> : null} {busy ? "đang đồng bộ…" : res ? "đã đồng bộ" : "—"}</span>
       </div>
-      {!res && busy && <p className="muted" style={{ marginBottom: 0 }}>Đang tự động tạo + đồng bộ tín hiệu khóa ra Matter…</p>}
+      {!res && busy && <p className="muted" style={{ marginBottom: 0 }}>Đang tạo đèn Matter, commission vào hub và dựng automation local…</p>}
       {fx.data?.error && <div className="err" style={{ marginTop: 10 }}>{fx.data.error}</div>}
       {res && (
         <>
           <div className="badges">
-            <span className="badge">Đồng bộ ra Matter <b>{totalSynced}</b> tín hiệu</span>
-            {totalCreated > 0 && <span className="badge">Tạo mới <b>{totalCreated}</b></span>}
-            {res[0]?.bridgeName && <span className="badge muted">bridge: {res[0].bridgeName}</span>}
+            <span className="badge">Automation <b>{totalAutomations}</b></span>
+            <span className="badge">Đèn <b>{res.filter((r) => r.light?.aqaraDid).length}/{res.length}</b></span>
+            {res[0]?.hubName && <span className="badge muted">hub: {res[0].hubName}</span>}
           </div>
+          {res.map((r) => (
+            <div className="ev" key={r.lockDid} style={{ marginTop: 8 }}>
+              <span>
+                <span className="who">{r.lockName}</span>{" "}
+                <span className="how">{r.light.status} · level {r.light.currentLevel}{r.light.aqaraDid ? ` · ${r.light.aqaraDid}` : ""}</span>
+              </span>
+              <span className="t">{r.automationsCreated} auto</span>
+            </div>
+          ))}
           {code && (
             <div style={{ marginTop: 8 }}>
-              <div className="muted" style={{ fontSize: 12 }}>Mã ghép Matter cho Home Assistant (Add device → Matter):</div>
+              <div className="muted" style={{ fontSize: 12 }}>Mã pairing đèn bridge đầu tiên:</div>
               <code style={{ fontSize: 18, letterSpacing: 1, color: "var(--ac)" }}>{code.replace(/(\d{4})(\d{3})(\d{4})/, "$1-$2-$3")}</code>
             </div>
           )}
@@ -93,6 +101,11 @@ function LockCard({ lock }: { lock: LockView }) {
           </span>
         )}
         <span className="badge muted">{lock.model}</span>
+        {lock.bridge?.aqaraDid && (
+          <span className="badge" title={`đèn bridge ${lock.bridge.aqaraDid} · mức ${lock.bridge.currentLevel}`}>
+            Bridge <b>{lock.bridgeEvent ?? `mức ${lock.bridge.currentLevel}`}</b>
+          </span>
+        )}
       </div>
       <div className="row">
         <fetcher.Form method="post" action="/api/lock" style={{ flex: 1 }}>

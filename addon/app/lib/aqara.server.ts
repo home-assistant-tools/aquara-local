@@ -1,6 +1,7 @@
 import { AquaraMobileClient } from "../../../client/AquaraMobileClient";
 import { AqaraMatterCloud } from "../../../client/aqaraMatter";
 import { loginWithPasswordPlain } from "../../../client/loginPlain";
+import { decodeLevel, lockStateFromLevel, getLightInfo, type LightBridgeInfo } from "./lightBridge.server";
 import type { AuthData } from "./session.server";
 export { REGIONS } from "./regions";
 
@@ -24,6 +25,8 @@ export interface LockView {
   battery: number | null;
   online: boolean;
   events: LockEvent[];
+  bridge: LightBridgeInfo | null;
+  bridgeEvent: string | null; // nhãn sự kiện gần nhất decode từ mức sáng đèn (realtime local)
 }
 
 export interface LockEvent {
@@ -71,6 +74,11 @@ export async function lockView(cloud: AqaraMatterCloud, lock: { did: string; nam
     cloud.getLockSignals(lock.did).catch(() => ({} as Record<string, string>)),
     cloud.getLockHistory(lock.did, nEvents).catch(() => [] as any[]),
   ]);
+  const bridge = getLightInfo(lock.did);
+  // Trạng thái khóa: ưu tiên kênh BRIDGE (đèn — realtime local qua hub automation),
+  // fallback cloud lock_state. bridgeEvent = nhãn sự kiện gần nhất (vd "Mở bằng vân tay").
+  const bridgeState = bridge ? lockStateFromLevel(bridge.currentLevel) : "unknown";
+  const bridgeEvent = bridge && bridge.currentLevel > 1 ? decodeLevel(bridge.currentLevel) : null;
   const events: LockEvent[] = (hist || [])
     .filter((h) => h?.attr === "lock_local_log" && h?.value)
     .slice(0, nEvents)
@@ -81,9 +89,14 @@ export async function lockView(cloud: AqaraMatterCloud, lock: { did: string; nam
     model: lock.model,
     homePositionId: lock.homePositionId,
     roomPositionId: lock.roomPositionId,
-    lockState: LOCK_STATE[sig.lock_state] ?? sig.lock_state ?? "?",
+    lockState:
+      bridgeState === "locked" || bridgeState === "unlocked"
+        ? bridgeState
+        : LOCK_STATE[sig.lock_state] ?? sig.lock_state ?? "?",
     battery: sig.batt_0_remain_percentage != null ? Number(sig.batt_0_remain_percentage) : null,
     online: sig.device_offline_status === "1" || sig.device_offline_status == null,
     events,
+    bridge,
+    bridgeEvent,
   };
 }

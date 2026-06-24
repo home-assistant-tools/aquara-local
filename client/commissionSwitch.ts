@@ -18,11 +18,13 @@
 //    (decommission switch hiện tại trước). Struct dưới đây theo type-def 0.17.
 import "@matter/nodejs";
 import crypto from "node:crypto";
-import { Crypto, Environment, ServerNode } from "@matter/main";
-import { CertificateAuthority, Rcac, Icac, FabricAuthority } from "@matter/protocol";
+import { Crypto, Environment, ServerNode, PrivateKey, Bytes } from "@matter/main";
+import { CertificateAuthority, Rcac, Icac, FabricAuthority, Noc } from "@matter/protocol";
 import type { MatterFabric } from "./aqaraMatter";
 
-const AQARA_VENDOR_ID = 4447; // 0x115F — admin vendor của fabric Aqara (từ addNoc capture)
+const MATTER_EPOCH_S = 946684800; // 2000-01-01 UTC (Matter cert time base)
+
+export const AQARA_VENDOR_ID = 4447; // 0x115F — admin vendor của fabric Aqara (từ addNoc capture)
 
 /** PEM (PKCS8 EC P-256) → {publicKey:65B uncompressed, privateKey:32B} cho BinaryKeyPair. */
 function ecKeyPairFromPem(pem: string): { publicKey: Uint8Array; privateKey: Uint8Array } {
@@ -66,7 +68,57 @@ export async function buildAqaraCa(env: Environment, fabric: MatterFabric): Prom
   } as any;
 
   const cryptoSvc = env.get(Crypto);
-  return await CertificateAuthority.create(cryptoSvc, config);
+  const ca = await CertificateAuthority.create(cryptoSvc, config);
+
+  // ⚠ FIX QUAN TRỌNG (2026-06-22): matter.js generateNoc HARDCODE notBefore = now-1năm
+  // (CertificateAuthority.js:181 `jsToMatterDate(now,-1)`). Vì RCAC/ICAC của Aqara được tạo
+  // 2025-11, NOC sinh bây giờ có notBefore=2025-06 → SỚM HƠN hiệu lực của CA → validator
+  // nghiêm của hub M100 (connectedhomeip) REJECT chain ở Sigma2 → "InvalidParam", hub KHÔNG
+  // adopt. App Aqara thật đặt notBefore≈lúc commission (sau 2025-11) nên nest đúng.
+  // → Override generateNoc: notBefore = now (nest trong ICAC/RCAC). KHÔNG sửa node_modules.
+  const icacIdBig = BigInt("0x" + fabric.icacId);
+  const icacSigningKey = PrivateKey(icacKeyPair as any);
+  const icacAki = hexToBytes(fabric.subjectKeyId);
+  // ⚠ FIX #2: NOC issuer DN phải KHỚP ĐÚNG subject DN của ICAC. ICAC Aqara có subject =
+  // {icacId, fabricId} (CÓ fabricId!), nhưng matter.js mặc định đặt NOC issuer = {icacId} thôi
+  // → CHIP của M100 thấy issuer-DN ≠ ICAC subject-DN → reject chain (InvalidParam).
+  // Lấy subject thật của ICAC làm issuer.
+  const icacSubject = (icac as any).cert?.subject ?? (icac as any).subject ?? { icacId: icacIdBig };
+  let nocSerial = icacIdBig + 0x1000n; // serial duy nhất, không đụng id RCAC/ICAC
+  (ca as any).generateNoc = async (
+    publicKey: Uint8Array,
+    fabricId: bigint,
+    nodeId: bigint,
+    caseAuthenticatedTags?: number[],
+  ): Promise<Uint8Array> => {
+    const nowS = Math.floor(Date.now() / 1000);
+    const notBefore = nowS - MATTER_EPOCH_S - 3600; // -1h chống lệch đồng hồ, vẫn > CA notBefore
+    const notAfter = nowS - MATTER_EPOCH_S + 10 * 365 * 24 * 3600; // ~10 năm
+    const certId = nocSerial++;
+    let serialHex = certId.toString(16);
+    if (serialHex.length % 2) serialHex = "0" + serialHex;
+    const cert = new Noc({
+      serialNumber: hexToBytes(serialHex),
+      signatureAlgorithm: 1,
+      publicKeyAlgorithm: 1,
+      ellipticCurveIdentifier: 1,
+      issuer: icacSubject,
+      notBefore,
+      notAfter,
+      subject: { fabricId, nodeId, caseAuthenticatedTags },
+      ellipticCurvePublicKey: publicKey,
+      extensions: {
+        basicConstraints: { isCa: false },
+        keyUsage: { digitalSignature: true },
+        extendedKeyUsage: [2, 1],
+        subjectKeyIdentifier: Bytes.of(await cryptoSvc.computeHash(publicKey)).slice(0, 20),
+        authorityKeyIdentifier: icacAki,
+      },
+    } as any);
+    await cert.sign(cryptoSvc, icacSigningKey);
+    return cert.asSignedTlv() as Uint8Array;
+  };
+  return ca;
 }
 
 export interface CommissionResult {

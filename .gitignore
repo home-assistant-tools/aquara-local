@@ -9,6 +9,10 @@ credentials.json
 secrets.json
 .env
 .env.*
+# router backup (WiFi PSK / OpenVPN key / SSH host private key / TLS key) + firmware — KHONG public
+router-backup/
+# config THAT cua mac-media-agent (MQTT pass + RTSP cam creds) — chi commit config.example.json
+mac-media-agent/config.json
 
 # ===== Aqara IP - KHONG phan phoi lai: APK goc, JS bundle, native lib =====
 apk/

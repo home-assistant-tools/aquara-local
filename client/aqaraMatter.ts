@@ -70,10 +70,58 @@ export class AqaraMatterCloud {
     return out;
   }
 
+  /** Mọi device trong mọi home (did/model/name/room/home/parent) — nền cho scan hub/khóa. */
+  async scanAllDevices(): Promise<Array<{ did: string; model: string; name: string; roomPositionId: string; homePositionId: string; parentDeviceId: string }>> {
+    const home = await this.cloud.get<any>("/app/position/query/home/list", { needDefaultRoom: "false", size: 300, startIndex: 0 });
+    const homes = home?.homes ?? home?.result?.homes ?? [];
+    const out: any[] = [];
+    for (const h of homes) {
+      const homePid = h.positionId ?? h.homeId;
+      const dev = await this.cloud.get<any>("/app/position/device/query", { positionId: homePid, size: 300, startIndex: 0 });
+      const list = dev?.devices ?? dev?.data ?? dev?.result?.devices ?? [];
+      for (const d of list)
+        out.push({
+          did: d.did ?? d.subjectId, model: String(d.model ?? ""), name: d.deviceName ?? d.name ?? "",
+          roomPositionId: d.positionId ?? homePid, homePositionId: homePid, parentDeviceId: d.parentDeviceId ?? "",
+        });
+    }
+    return out;
+  }
+
+  /** Hub Matter-controller (commission được thiết bị Matter) trong account.
+   *  Lọc: model gateway/hub-class (LOẠI motion/sensor/lock/plug/switch/light) + đọc được 13.202.85. */
+  async discoverMatterHubs(): Promise<Array<{ did: string; name: string; model: string; homePositionId: string; roomPositionId: string }>> {
+    const devs = await this.scanAllDevices();
+    const isHubModel = (m: string) =>
+      /gateway|\bhub\b|camera|agl008|aqcn|agl00[0-9]/i.test(m) &&
+      !/motion|sensor|\.lock\.|plug|switch|light|curtain|airer|sensor_/i.test(m);
+    const out: any[] = [];
+    for (const d of devs.filter((d) => isHubModel(d.model))) {
+      if (await this.isMatterBridgeHub(d.did))
+        out.push({ did: d.did, name: d.name || d.model, model: d.model, homePositionId: d.homePositionId, roomPositionId: d.roomPositionId });
+    }
+    return out;
+  }
+
+  /** Khóa "bound" vào 1 hub = khóa có parentDeviceId trỏ về hub đó (hub này chạy automation cho khóa).
+   *  Fallback: nếu KHÔNG khóa nào trỏ parent về hub, lấy khóa cùng home (single-hub home). */
+  async locksBoundToHub(hub: { did: string; homePositionId: string }): Promise<Array<{ did: string; name: string; model: string; roomPositionId: string; homePositionId: string; parentDeviceId: string }>> {
+    const locks = await this.discoverLocks();
+    const byParent = locks.filter((l) => l.parentDeviceId === hub.did);
+    if (byParent.length) return byParent;
+    const sameHome = locks.filter((l) => l.homePositionId === hub.homePositionId);
+    return sameHome.filter((l) => !l.parentDeviceId); // chỉ khóa chưa có parent rõ ràng
+  }
+
   // Matter DoorLock trait (cloud → hub → Zigbee, KHÔNG cần BLE). ✅ verified.
   private async matterWrite(did: string, trait: string, value: any = ""): Promise<void> {
     await this.cloud.post("/matter/write", { data: { [trait]: value }, did, pwd: "", type: 0 });
   }
+  /** POST /matter/remove {did, fullValue:true} — gỡ 1 thiết bị Matter khỏi hub (vd đèn ảo để add lại). */
+  async removeMatterDevice(did: string): Promise<void> {
+    await this.cloud.post("/matter/remove", { did, fullValue: true });
+  }
+
   /** Mở khóa từ xa (Matter unlockDoor 2.148.35011). */
   async remoteUnlock(lockDid: string): Promise<void> {
     await this.matterWrite(lockDid, "2.148.35011.0");
@@ -294,12 +342,78 @@ export class AqaraMatterCloud {
     return res?.linkageId ?? res?.result?.linkageId ?? "";
   }
 
+  /**
+   * Builder TỔNG QUÁT: tạo automation "trigger bất kỳ → action bất kỳ (+ giá trị)".
+   * Cùng endpoint `/ifttt/linkage/pro/wit/set`, chạy LOCAL trên hub. Dùng cho hướng đèn-bridge:
+   *   trigger = sự kiện khóa (TD.* từ getDeviceActions/triggerEvents)
+   *   action  = đặt độ sáng đèn ảo Matter = N  (AD.* + param value, từ getDeviceActions)
+   * `action.value` + `action.param` (catalog param từ getDeviceActions) → nhúng value vào params.
+   */
+  async createAutomation(args: {
+    homePositionId: string;
+    name: string;
+    iconInfo?: string;
+    trigger: {
+      subjectId: string; subjectModel: string; subjectName?: string; roomPositionId: string;
+      triggerDefinitionId: string; triggerName: string;
+      endpointId?: string; endpointName?: string; usageType?: number; type?: number; group?: string; params?: any[];
+    };
+    action: {
+      subjectId: string; subjectModel: string; subjectName?: string; roomPositionId: string;
+      actionDefinitionId: string; actionName: string; rids: string[];
+      endpointId?: string; value?: string; param?: any; group?: string;
+    };
+  }): Promise<string> {
+    const t = args.trigger, ac = args.action;
+    const actionParams = ac.value != null
+      ? [{ ...(ac.param ?? {}), value: ac.value, originValue: ac.value }]
+      : [];
+    const whenItem = {
+      actionDefinitionId: null, actionName: "", appFilterRule: 0, appIdAssignType: 0, beginTimeBand: "",
+      cateoryValue: [], conditionId: "", definitionIcon: "", delayTime: "0", delayTimeUnit: "0", delayType: "0",
+      durationTime: "", endTimeBand: "", endpointId: t.endpointId ?? "", endpointName: t.endpointName ?? "",
+      eventType: 0, fenceDataList: "", filterMonostable: 0, group: t.group ?? "", groupId: "", groupName: "",
+      groupSort: "999", iconId: "", iconInfo: "", isGeoCurrentClientLocalInRange: false, isGeoNeedToShowActiveInfo: false,
+      isMatchedDevice: false, lockState: 0, logicNot: 0, mutex: [], openLevel: 1, originParams: [], params: t.params ?? [],
+      positionId: t.roomPositionId, rids: [], rules: [], serialNum: 0, showName: "${triggerName}", sortNo: 0, status: 1,
+      subSort: "999", subjectId: t.subjectId, subjectModel: t.subjectModel, subjectName: t.subjectName ?? "", subjectType: "1",
+      tagInfo: {}, timeBandType: 0, triggerDefinitionId: t.triggerDefinitionId, triggerName: t.triggerName,
+      triggerType: 0, type: t.type ?? -1, usageType: t.usageType ?? 0, version: 0, xcode: "",
+    };
+    const thenItem = {
+      actionDefinitionId: ac.actionDefinitionId, actionName: ac.actionName, appFilterRule: 2, appIdAssignType: 0,
+      beginTimeBand: "", cateoryValue: [], conditionId: "", definitionIcon: null, delayTime: "0", delayTimeUnit: "0",
+      delayType: "0", durationTime: "", endTimeBand: "", endpointId: ac.endpointId ?? "", endpointName: "", eventType: 0,
+      fenceDataList: "", filterMonostable: 0, group: ac.group ?? "", groupId: "", groupName: "", groupSort: "999",
+      iconId: "", iconInfo: "", isGeoCurrentClientLocalInRange: false, isGeoNeedToShowActiveInfo: false, isMatchedDevice: false,
+      lockState: 0, logicNot: 0, mutex: [], openLevel: 0, originParams: [], params: actionParams,
+      positionId: ac.roomPositionId, rids: ac.rids, rules: [], serialNum: 0, showName: "${actionName} $mv{'default'} $mu{'default'}",
+      sortNo: 0, status: 1, subSort: "999", subjectId: ac.subjectId, subjectModel: ac.subjectModel,
+      subjectName: ac.subjectName ?? "", subjectType: "1", tagInfo: {}, timeBandType: 0, triggerDefinitionId: null,
+      triggerName: "", triggerType: 0, type: 1, usageType: 0, version: 0, xcode: "",
+    };
+    const body = {
+      executeOnce: false, fenceDataList: null, iconInfo: args.iconInfo ?? "", ifConfig: { content: [], duration: 0, relation: 0 },
+      linkageId: null, name: args.name, oldLinkageId: null, positionId: args.homePositionId, tags: null,
+      thenConfig: { content: [thenItem], duration: 0, relation: 0 },
+      whenConfig: { content: [whenItem], duration: 0, relation: 0 },
+    };
+    const res = await this.cloud.post<any>("/ifttt/linkage/pro/wit/set", body);
+    return res?.linkageId ?? res?.result?.linkageId ?? "";
+  }
+
   // ---- list / delete automation (cleanup + idempotency) --------------------
   // GET /app/position/linkage/query → {ifttts:[{linkageId,name,iconInfo,...}]}
   async listLinkages(positionId: string): Promise<Array<{ linkageId: string; name: string; iconInfo: string }>> {
-    const r = await this.cloud.get<any>("/app/position/linkage/query", { positionId, size: 150, startIndex: 0 });
-    const arr = r?.ifttts ?? r?.result?.ifttts ?? [];
-    return arr.map((x: any) => ({ linkageId: x.linkageId, name: x.name, iconInfo: x.iconInfo ?? "" }));
+    const out: Array<{ linkageId: string; name: string; iconInfo: string }> = [];
+    for (let start = 0; start < 4000; start += 200) {
+      const r = await this.cloud.get<any>("/app/position/linkage/query", { positionId, size: 200, startIndex: start });
+      const arr = r?.ifttts ?? r?.result?.ifttts ?? [];
+      if (!arr.length) break;
+      out.push(...arr.map((x: any) => ({ linkageId: x.linkageId, name: x.name, iconInfo: x.iconInfo ?? "" })));
+      if (arr.length < 200) break;
+    }
+    return out;
   }
 
   // POST /ifttt/batch/delete {linkageIds:[...]}
@@ -407,8 +521,8 @@ export class AqaraMatterCloud {
    * `triggerDefinitionId` (TD.unlock_someone_{fing,nfc,password,indoor,away,emergency,...}),
    * `triggerName`, `group`. Trả mảng phẳng các event (unique theo triggerDefinitionId).
    */
-  async getLockTriggerEvents(lockDid: string): Promise<Array<{ triggerDefinitionId: string; triggerName: string; group: string }>> {
-    const r = await this.cloud.get<any>("/ifttt/subject/trigger/query", { applicationSide: 1, subjectId: lockDid });
+  async getDeviceTriggers(subjectId: string): Promise<Array<{ triggerDefinitionId: string; triggerName: string; group: string; params: any[]; raw: any }>> {
+    const r = await this.cloud.get<any>("/ifttt/subject/trigger/query", { applicationSide: 1, subjectId });
     const arrs: any[] = Array.isArray(r) ? r : Object.values(r ?? {}).filter(Array.isArray).flat();
     const seen = new Set<string>();
     const out: any[] = [];
@@ -416,7 +530,42 @@ export class AqaraMatterCloud {
       const td = e?.triggerDefinitionId;
       if (td && !seen.has(td)) {
         seen.add(td);
-        out.push({ triggerDefinitionId: td, triggerName: e.triggerName ?? td, group: e.group ?? "" });
+        out.push({ triggerDefinitionId: td, triggerName: e.triggerName ?? td, group: e.group ?? "", params: e.params ?? [], raw: e });
+      }
+    }
+    return out;
+  }
+
+  async getLockTriggerEvents(lockDid: string): Promise<Array<{ triggerDefinitionId: string; triggerName: string; group: string }>> {
+    return (await this.getDeviceTriggers(lockDid)).map(({ triggerDefinitionId, triggerName, group }) => ({
+      triggerDefinitionId,
+      triggerName,
+      group,
+    }));
+  }
+
+  /**
+   * GET /ifttt/subject/action/query → catalog ACTION (then) của 1 thiết bị (mirror trigger/query).
+   * Trả mảng phẳng `{actionDefinitionId, actionName, rids, params, group}` để dựng thenConfig
+   * cho automation (vd action "chỉnh độ sáng đèn ảo Matter" → AD.* + param brightness).
+   */
+  async getDeviceActions(subjectId: string): Promise<Array<{ actionDefinitionId: string; actionName: string; rids: string[]; params: any[]; group: string; raw: any }>> {
+    const r = await this.cloud.get<any>("/ifttt/subject/action/query", { applicationSide: 1, subjectId });
+    const arrs: any[] = Array.isArray(r) ? r : Object.values(r ?? {}).filter(Array.isArray).flat();
+    const seen = new Set<string>();
+    const out: any[] = [];
+    for (const a of arrs) {
+      const ad = a?.actionDefinitionId;
+      if (ad && !seen.has(ad)) {
+        seen.add(ad);
+        // rids: catalog matter-device thường KHÔNG trả rids → derive từ actionDefinitionId.
+        // `AD.2.133.33052.0-0-SetBrightness_cmd` → rid `2.133.33052` (endpoint.resClass.resId).
+        let rids: string[] = a.rids ?? [];
+        if (!rids.length) {
+          const m = String(ad).match(/^AD\.(\d+\.\d+\.\d+)/);
+          if (m) rids = [m[1]];
+        }
+        out.push({ actionDefinitionId: ad, actionName: a.actionName ?? ad, rids, params: a.params ?? [], group: a.group ?? "", raw: a });
       }
     }
     return out;
@@ -496,6 +645,22 @@ export class AqaraMatterCloud {
     return r?.data ?? r?.result?.data ?? [];
   }
 
+  /** GET /ifttt/event/list → TOÀN BỘ event/tín hiệu đã tạo trong home (`CL.xxx`),
+   *  KHÔNG chỉ những cái đã sync ra Matter. Trả [{id, name, createTime}]. */
+  async iftttEventList(positionId: string): Promise<Array<{ id: string; name: string; createTime: number }>> {
+    const r = await this.cloud.get<any>("/ifttt/event/list", { positionId, size: 300, startIndex: 0 });
+    const arr: any[] = Array.isArray(r) ? r : (r?.events ?? r?.eventList ?? r?.list ?? r?.data ?? []);
+    return arr
+      .map((e: any) => ({ id: e.id ?? e.eventId ?? e.iftttId, name: e.name ?? "", createTime: e.createTime ?? 0 }))
+      .filter((e) => !!e.id);
+  }
+
+  /** POST /ifttt/batch/delete {eventIds:[...]} — XÓA hẳn event/tín hiệu (`CL.xxx`) khỏi account. */
+  async deleteEvents(eventIds: string[]): Promise<void> {
+    if (!eventIds.length) return;
+    await this.cloud.post("/ifttt/batch/delete", { eventIds });
+  }
+
   /** GET /dev/signals/bridge/query → thiết bị bridge (vd G410) cho position. */
   async getSignalBridge(positionId: string): Promise<{ deviceId: string; deviceModel: string; deviceName: string } | null> {
     const r = await this.cloud.get<any>("/dev/signals/bridge/query", { positionId });
@@ -507,10 +672,12 @@ export class AqaraMatterCloud {
     await this.cloud.post("/dev/signals/add", { data: signals, positionId });
   }
 
-  /** POST /dev/signals/delete — gỡ signal khỏi Matter. */
-  async deleteSignals(signalIds: string[], positionId: string): Promise<void> {
-    if (!signalIds.length) return;
-    await this.cloud.post("/dev/signals/delete", { data: signalIds, positionId });
+  /** POST /dev/signals/delete {positionId, ids:[deviceDid]} — gỡ TẤT CẢ tín hiệu của (các)
+   *  thiết bị khỏi Matter bridge. ⚠️ Aqara xóa THEO DEVICE (did), KHÔNG theo từng signal-id
+   *  (xác nhận từ RN bundle: removeSignals → ids:[Device.deviceID]). */
+  async deleteSignals(deviceDids: string[], positionId: string): Promise<void> {
+    if (!deviceDids.length) return;
+    await this.cloud.post("/dev/signals/delete", { positionId, ids: deviceDids });
   }
 
   /** Dò hub Matter-bridge trong 1 home (gateway nào đọc được resource 13.202.85). */
