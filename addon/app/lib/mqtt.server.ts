@@ -14,7 +14,16 @@ import {
   type BridgeLock,
 } from "./lightBridge.server";
 
-const DIRECTION_OPTIONS = ["Từ bên ngoài", "Từ bên trong"];
+// Sự kiện CHUNG khi mở từ NGOÀI (bất kỳ cách: vân tay/chìa/khóa cơ/mật khẩu/thẻ).
+// Emit NGAY khi phát hiện mở-từ-ngoài → OUTSIDE_LEAD_MS sau mới tới sự kiện cụ thể (ai mở).
+const OUTSIDE_GENERIC = "Mở từ bên ngoài";
+const OUTSIDE_LEAD_MS = 500;
+// Event + Hướng publish KHÔNG retain (sự kiện NHẤT THỜI) → broker không giữ → reconnect KHÔNG replay →
+// automation (trigger `to: X`) không bị bắn OAN. Lá chắn thêm = condition `not_from unavailable/unknown`
+// trên automation (lo cả lúc addon offline). Lock STATE thì NGƯỢC LẠI — GIỮ retain (trạng thái bền).
+const EVENT_PUB = { retain: false } as const;
+// D100 TỰ KHÓA lại sau vài giây → poll cloud lại sau khoảng này để bắt trạng thái "đã khóa" thật.
+const AUTOLOCK_RECHECK_MS = 8000;
 
 const DISCOVERY_PREFIX = process.env.MQTT_DISCOVERY_PREFIX || "homeassistant";
 const BASE = "aqara_d100";
@@ -33,7 +42,6 @@ const stateTopic = (u: string) => `${BASE}/${u}/state`;
 const cmdTopic = (u: string) => `${BASE}/${u}/set`;
 const battTopic = (u: string) => `${BASE}/${u}/battery`;
 const eventTopic = (u: string) => `${BASE}/${u}/event`;
-const dirTopic = (u: string) => `${BASE}/${u}/direction`;
 const availTopic = (u: string) => `${BASE}/${u}/availability`;
 
 function deviceBlock(u: string, name: string) {
@@ -61,12 +69,7 @@ function publishDiscovery(u: string, name: string) {
   cfg("sensor", "event", {
     name: "Sự kiện gần nhất", has_entity_name: true, unique_id: `${BASE}_${u}_event`,
     state_topic: eventTopic(u), icon: "mdi:door",
-    device_class: "enum", options: allEventLabels(), // → HA cho dropdown chọn (gồm per-người)
-  });
-  cfg("sensor", "direction", {
-    name: "Hướng mở", has_entity_name: true, unique_id: `${BASE}_${u}_direction`,
-    state_topic: dirTopic(u), icon: "mdi:door-open",
-    device_class: "enum", options: DIRECTION_OPTIONS, // Từ bên ngoài / Từ bên trong
+    device_class: "enum", options: [OUTSIDE_GENERIC, ...allEventLabels()], // generic "Mở từ bên ngoài" + per-người
   });
 }
 
@@ -81,6 +84,29 @@ async function unlockBothPaths(lockDid: string): Promise<string> {
   const ok = tasks.filter((_, i) => res[i].status === "fulfilled").map((t) => t.name);
   const fail = tasks.filter((_, i) => res[i].status === "rejected").map((t) => t.name);
   return `ok=[${ok.join(",")}]${fail.length ? ` fail=[${fail.join(",")}]` : ""}`;
+}
+
+/** Đọc lock_state từ cloud → publish (CLOUD LÀ NGUỒN ĐÚNG; D100 tự khóa lại nên bridge hay bỏ lỡ sự kiện khóa). */
+async function pushCloudLockState(lockDid: string) {
+  const cloud = getCloud();
+  if (!cloud || !client?.connected) return;
+  try {
+    const sig = await cloud.getLockSignals(lockDid);
+    const u = uid(lockDid);
+    const cs =
+      sig.lock_state === "2" || sig.lock_state === "4" ? "LOCKED" : sig.lock_state === "1" || sig.lock_state === "3" ? "UNLOCKED" : null;
+    if (cs) applyLockState(u, cs);
+  } catch {
+    /* offline → bỏ qua */
+  }
+}
+
+/** Đặt trạng thái khóa + TỔNG HỢP sự kiện "Đã khóa" khi chuyển → LOCKED (D100 tự khóa lặng, không bắn sự kiện). */
+function applyLockState(u: string, cs: "LOCKED" | "UNLOCKED") {
+  if (!client?.connected || lastState.get(u) === cs) return;
+  lastState.set(u, cs);
+  client.publish(stateTopic(u), cs, { retain: true }); // state: GIỮ retain
+  if (cs === "LOCKED" && !isSelfAction(u)) client.publish(eventTopic(u), "Đã khóa", EVENT_PUB); // event: non-retain
 }
 
 /** Bắt đầu cầu nối MQTT cho danh sách khóa. CHẠY ĐƯỢC OFFLINE (cloud=null). Idempotent. */
@@ -121,12 +147,17 @@ export async function startMqttBridge(locks: BridgeLock[]): Promise<void> {
     try {
       if (cmd === "UNLOCK") {
         selfActionUntil.set(u, Date.now() + SELF_ACTION_MS);
-        client!.publish(eventTopic(u), "Mở từ Home Assistant", { retain: true });
+        lastState.set(u, "UNLOCKED");
+        client!.publish(stateTopic(u), "UNLOCKED", { retain: true }); // state: GIỮ retain
+        client!.publish(eventTopic(u), "Mở từ Home Assistant", EVENT_PUB); // event: non-retain
         const how = await unlockBothPaths(lock.did);
         console.log(`[mqtt] UNLOCK ${lock.did} ${how}`);
+        setTimeout(() => pushCloudLockState(lock.did), AUTOLOCK_RECHECK_MS); // bắt khi D100 tự khóa lại
       } else if (cmd === "LOCK") {
         selfActionUntil.set(u, Date.now() + SELF_ACTION_MS);
-        client!.publish(eventTopic(u), "Khóa từ Home Assistant", { retain: true });
+        lastState.set(u, "LOCKED");
+        client!.publish(stateTopic(u), "LOCKED", { retain: true }); // state: GIỮ retain — FIX kẹt "đã mở khóa"
+        client!.publish(eventTopic(u), "Khóa từ Home Assistant", EVENT_PUB); // event: non-retain
         const cloud = getCloud();
         if (cloud) {
           await cloud.remoteLock(lock.did); // chỉ có đường cloud (khóa không lộ action local)
@@ -151,11 +182,22 @@ export async function startMqttBridge(locks: BridgeLock[]): Promise<void> {
       const v = st === "locked" ? "LOCKED" : "UNLOCKED";
       lastState.set(u, v);
       client.publish(stateTopic(u), v, { retain: true });
+      if (st === "unlocked") setTimeout(() => pushCloudLockState(lockDid), AUTOLOCK_RECHECK_MS); // bắt auto-lock
     }
     const ev = decodeLevel(level);
-    if (ev && !isSelfAction(u)) client.publish(eventTopic(u), ev, { retain: true });
     const dir = unlockDirectionFromLevel(level); // trong/ngoài
-    if (dir) client.publish(dirTopic(u), dir === "in" ? "Từ bên trong" : "Từ bên ngoài", { retain: true });
+    const selfAct = isSelfAction(u);
+    if (ev && !selfAct) {
+      if (dir === "out") {
+        // MỞ TỪ NGOÀI (vân tay/chìa/khóa cơ/mật khẩu/thẻ): emit generic NGAY → 500ms sau mới sự kiện cụ thể (ai mở).
+        client.publish(eventTopic(u), OUTSIDE_GENERIC, EVENT_PUB);
+        setTimeout(() => {
+          if (client?.connected && !isSelfAction(u)) client.publish(eventTopic(u), ev, EVENT_PUB);
+        }, OUTSIDE_LEAD_MS);
+      } else {
+        client.publish(eventTopic(u), ev, EVENT_PUB); // mở từ trong / sự kiện khác: emit ngay
+      }
+    }
   });
 
   // Cloud poll (CHỈ khi online): pin + state-fallback. Mất mạng → bỏ qua, không sập.
@@ -167,11 +209,9 @@ export async function startMqttBridge(locks: BridgeLock[]): Promise<void> {
         const sig = await cloud.getLockSignals(l.did);
         const u = uid(l.did);
         if (sig.batt_0_remain_percentage != null) client.publish(battTopic(u), String(sig.batt_0_remain_percentage), { retain: true });
-        // state-fallback từ cloud chỉ khi bridge chưa cho trạng thái rõ
-        if (!lastState.has(u)) {
-          const cs = sig.lock_state === "2" || sig.lock_state === "4" ? "LOCKED" : sig.lock_state === "1" || sig.lock_state === "3" ? "UNLOCKED" : null;
-          if (cs) client.publish(stateTopic(u), cs, { retain: true });
-        }
+        // CLOUD LÀ NGUỒN ĐÚNG cho trạng thái khóa (D100 auto-lock; bridge hay bỏ lỡ sự kiện khóa lại) → luôn đồng bộ.
+        const cs = sig.lock_state === "2" || sig.lock_state === "4" ? "LOCKED" : sig.lock_state === "1" || sig.lock_state === "3" ? "UNLOCKED" : null;
+        if (cs) applyLockState(u, cs);
       } catch {
         /* offline / lỗi cloud → bỏ qua nhịp này */
       }
