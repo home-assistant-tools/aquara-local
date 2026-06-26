@@ -23,8 +23,9 @@ const OUTSIDE_LEAD_MS = 500;
 // automation (trigger `to: X`) không bị bắn OAN. Lá chắn thêm = condition `not_from unavailable/unknown`
 // trên automation (lo cả lúc addon offline). Lock STATE thì NGƯỢC LẠI — GIỮ retain (trạng thái bền).
 const EVENT_PUB = { retain: false } as const;
-// D100 TỰ KHÓA lại sau vài giây → poll cloud lại sau khoảng này để bắt trạng thái "đã khóa" thật.
-const AUTOLOCK_RECHECK_MS = 8000;
+// D100 TỰ KHÓA lại sau vài giây nhưng cloud phản ánh TRỄ không cố định (mở nút HA còn trễ hơn) →
+// recheck cloud lock_state ở NHIỀU mốc tới khi thấy LOCKED (applyLockState tự bỏ qua khi đã đúng).
+const AUTOLOCK_RECHECKS_MS = [4000, 9000, 16000, 28000, 45000];
 
 const DISCOVERY_PREFIX = process.env.MQTT_DISCOVERY_PREFIX || "homeassistant";
 const BASE = "aqara_d100";
@@ -117,6 +118,11 @@ function applyLockState(u: string, cs: "LOCKED" | "UNLOCKED") {
   if (cs === "LOCKED" && !isSelfAction(u)) client.publish(eventTopic(u), "Đã khóa", EVENT_PUB); // event: non-retain
 }
 
+/** Sau mở khóa: poll cloud lock_state ở nhiều mốc để bắt D100 TỰ KHÓA (cloud trễ không cố định). */
+function scheduleAutoLockRecheck(lockDid: string) {
+  for (const ms of AUTOLOCK_RECHECKS_MS) setTimeout(() => pushCloudLockState(lockDid), ms);
+}
+
 /** Bắt đầu cầu nối MQTT cho danh sách khóa. CHẠY ĐƯỢC OFFLINE (cloud=null). Idempotent. */
 export async function startMqttBridge(locks: BridgeLock[]): Promise<void> {
   if (started) return;
@@ -181,7 +187,7 @@ export async function startMqttBridge(locks: BridgeLock[]): Promise<void> {
         client!.publish(eventTopic(u), "Mở từ Home Assistant", EVENT_PUB); // event: non-retain
         const how = await unlockBothPaths(lock.did);
         console.log(`[mqtt] UNLOCK ${lock.did} ${how}`);
-        setTimeout(() => pushCloudLockState(lock.did), AUTOLOCK_RECHECK_MS); // bắt khi D100 tự khóa lại
+        scheduleAutoLockRecheck(lock.did); // bắt khi D100 tự khóa lại (nhiều mốc)
       } else if (cmd === "LOCK") {
         selfActionUntil.set(u, Date.now() + SELF_ACTION_MS);
         lastState.set(u, "LOCKED");
@@ -211,7 +217,7 @@ export async function startMqttBridge(locks: BridgeLock[]): Promise<void> {
       const v = st === "locked" ? "LOCKED" : "UNLOCKED";
       lastState.set(u, v);
       client.publish(stateTopic(u), v, { retain: true });
-      if (st === "unlocked") setTimeout(() => pushCloudLockState(lockDid), AUTOLOCK_RECHECK_MS); // bắt auto-lock
+      if (st === "unlocked") scheduleAutoLockRecheck(lockDid); // bắt auto-lock (nhiều mốc)
     }
     const ev = decodeLevel(level);
     const dir = unlockDirectionFromLevel(level); // trong/ngoài
