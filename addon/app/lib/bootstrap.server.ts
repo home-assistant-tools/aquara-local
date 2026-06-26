@@ -58,26 +58,26 @@ async function cloudLoop(mqttStarted: boolean): Promise<void> {
     console.log("[bootstrap] không có AQARA_EMAIL/PASS → bỏ qua cloud (chỉ LOCAL).");
     return;
   }
-  let setupOk = false;
+  let everSetup = false;
   for (let attempt = 1; ; attempt++) {
     try {
       const auth = await login(email, pass, area);
       setOnline(auth); // ONLINE NGAY sau login → cloud poll (pin + lock-state) chạy, KHÔNG chờ matter-setup
-      if (!setupOk) {
-        try {
-          const res = await runMatterSetup(auth, { force: false });
-          const bound = res.filter((r) => r.light?.aqaraDid).length;
-          const autos = res.reduce((a, r) => a + r.automationsCreated, 0);
-          console.log(`[bootstrap] cloud setup OK: ${bound}/${res.length} bound, ${autos} automation mới.`);
-          for (const r of res) if (r.error) console.log(`[bootstrap]   ! ${r.lockName}: ${r.error}`);
-          if (!mqttStarted) await startLocalFromCache(); // lần đầu (chưa cache): config vừa lưu → dựng LOCAL giờ
-          setupOk = true;
-        } catch (e: any) {
-          // SETUP lỗi KHÔNG làm cloud offline → pin + lock-state VẪN poll được. Thử lại setup lần sau.
-          console.log(`[bootstrap] matter-setup lỗi (cloud VẪN online, thử lại 60s): ${e?.message ?? e}`);
-        }
+      try {
+        // RECONCILE MỖI LẦN LOGIN/RELOAD → automation về đúng bộ (tạo thiếu/xoá rác/dựng lại nếu lệch;
+        // khớp thì bỏ qua). force=true ở các lần sau để bỏ cache 5 phút → luôn kiểm tra thật.
+        const res = await runMatterSetup(auth, { force: everSetup });
+        const bound = res.filter((r) => r.light?.aqaraDid).length;
+        const autos = res.reduce((a, r) => a + r.automationsCreated, 0);
+        console.log(`[bootstrap] cloud setup OK: ${bound}/${res.length} bound, ${autos} automation reconcile.`);
+        for (const r of res) if (r.error) console.log(`[bootstrap]   ! ${r.lockName}: ${r.error}`);
+        if (!mqttStarted && !everSetup) await startLocalFromCache(); // lần đầu (chưa cache): config vừa lưu → dựng LOCAL
+        everSetup = true;
+      } catch (e: any) {
+        // SETUP lỗi KHÔNG làm cloud offline → pin + lock-state VẪN poll được. Thử lại lần sau.
+        console.log(`[bootstrap] matter-setup lỗi (cloud VẪN online, thử lại): ${e?.message ?? e}`);
       }
-      await sleep(setupOk ? 6 * 60 * 60 * 1000 : 60_000); // xong: refresh token 6h; chưa xong: thử setup lại 60s
+      await sleep(everSetup ? 6 * 60 * 60 * 1000 : 60_000); // xong: refresh+reconcile mỗi 6h; chưa: thử lại 60s
     } catch (e: any) {
       setOffline(); // CHỈ login lỗi mới → offline (mất mạng). Setup lỗi KHÔNG đụng tới đây.
       console.log(`[bootstrap] login lỗi lần ${attempt} (offline?): ${e?.message ?? e}. LOCAL vẫn chạy, thử lại 30s.`);

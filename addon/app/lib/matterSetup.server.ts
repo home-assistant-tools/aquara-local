@@ -34,7 +34,7 @@ export interface MatterSetupResult {
 const cache = new Map<string, { at: number; res: MatterSetupResult[] }>();
 const TTL = 5 * 60_000;
 
-// Tên automation tất định (cho idempotency: mở lại dashboard KHÔNG tạo trùng).
+// Tên automation tất định — TÊN = mã hoá (trigger + mức). Đổi trigger/mức → đổi tên → reconcile sẽ thay.
 const unlockAutomationName = (lockName: string) => `[addon] ${lockName}: đèn ON → mở khóa`;
 const levelAutomationName = (lockName: string, label: string, level: number) =>
   `[addon] ${lockName}: ${label} → mức ${level}`;
@@ -58,6 +58,13 @@ function pickOnTrigger(triggers: Awaited<ReturnType<ReturnType<typeof cloudFor>[
   );
 }
 
+/**
+ * RECONCILE automation trên hub Aqara cho ĐÚNG bộ mong muốn (chạy mỗi lần login/reload):
+ *  • PHA 1: build TOÀN BỘ automation mong muốn (tên + config) — KHÔNG ghi cloud.
+ *  • PHA 2: so với automation [addon] đang có → nếu LỆCH (thừa/thiếu/trùng) thì XOÁ SẠCH [addon] cũ
+ *    rồi TẠO LẠI đúng bộ; nếu khớp y hệt thì BỎ QUA (không churn).
+ * → diệt tận gốc bug "automation scheme cũ + mới chồng mức" + đảm bảo mỗi restart là chính xác.
+ */
 export async function runMatterSetup(
   auth: AuthData,
   opts: { force?: boolean } = {},
@@ -68,6 +75,7 @@ export async function runMatterSetup(
   }
 
   const cloud = cloudFor(auth);
+  type AutoConfig = Parameters<typeof cloud.createAutomation>[0];
   const hubs = (await cloud.discoverMatterHubs()) as BridgeHub[];
   const results: MatterSetupResult[] = [];
   const cfgHubs: BridgeHub[] = [];
@@ -84,11 +92,14 @@ export async function runMatterSetup(
       lockHub[l.did] = hub.did;
     }
     const fabric = await cloud.getFabric(hub.homePositionId);
-    // existing [addon] automations trong home → name→linkageId (idempotency)
-    const existing = new Map<string, string>();
-    for (const l of await cloud.listLinkages(hub.homePositionId).catch(() => []))
-      if (l.name?.startsWith("[addon]")) existing.set(l.name, l.linkageId);
+    // [addon] automation đang có trong home (để so + dọn)
+    const existing = (await cloud.listLinkages(hub.homePositionId).catch(() => [])).filter((l) =>
+      l.name?.startsWith("[addon]"),
+    );
 
+    // ── PHA 1: build DESIRED (KHÔNG ghi cloud — chỉ ensureVirtualLight/Bridge là cần thiết) ──
+    const desired: Array<{ name: string; config: AutoConfig }> = [];
+    const hubResults: MatterSetupResult[] = [];
     for (const lock of locks) {
       const light = await ensureVirtualLight(lock, hub);
       const r: MatterSetupResult = {
@@ -116,13 +127,12 @@ export async function runMatterSetup(
         if (!setBright) throw new Error("đèn Matter không lộ action SetBrightness");
         if (!onTrig) throw new Error("đèn Matter không lộ trigger OnOff");
 
-        // (1) CONTROL: đèn ON → mở D100 (local trên hub) — idempotent
-        const unlockName = unlockAutomationName(lock.name);
-        let unlockId = existing.get(unlockName);
-        if (!unlockId) {
-          unlockId = await cloud.createAutomation({
+        // (1) CONTROL: đèn ON → mở D100 (local trên hub)
+        desired.push({
+          name: unlockAutomationName(lock.name),
+          config: {
             homePositionId: hub.homePositionId,
-            name: unlockName,
+            name: unlockAutomationName(lock.name),
             iconInfo: `${light.model}#matter_device_icon_11|${lock.model}`,
             trigger: {
               subjectId: light.aqaraDid,
@@ -145,18 +155,17 @@ export async function runMatterSetup(
               actionName: "Mở khóa",
               rids: ["4.17.85"],
             },
-          });
-          if (unlockId) r.automationsCreated++;
-        }
+          },
+        });
 
-        // (2) STATUS: mỗi sự kiện khóa (có trong catalog) → SetBrightness(mức cố định) — idempotent
+        // (2) STATUS: mỗi sự kiện khóa (lock hỗ trợ) → SetBrightness(mức cố định)
         const lockTds = new Set(lockTriggers.map((t) => t.triggerDefinitionId));
         for (const ev of EVENT_LEVELS) {
           if (!lockTds.has(ev.td)) continue; // khóa không hỗ trợ sự kiện này
           const name = levelAutomationName(lock.name, ev.label, ev.level);
-          let lid = existing.get(name);
-          if (!lid) {
-            lid = await cloud.createAutomation({
+          desired.push({
+            name,
+            config: {
               homePositionId: hub.homePositionId,
               name,
               iconInfo: `${lock.model}|${light.model}#matter_device_icon_11`,
@@ -181,14 +190,12 @@ export async function runMatterSetup(
                 param: setBright.params?.[0],
                 value: String(ev.level),
               },
-            });
-            if (lid) r.automationsCreated++;
-          }
-          if (lid) r.levelMap.push({ level: ev.level, triggerName: ev.label, linkageId: lid });
+            },
+          });
+          r.levelMap.push({ level: ev.level, triggerName: ev.label, linkageId: "" });
         }
 
-        // (3) PER-NGƯỜI: mở từ NGOÀI bởi người cụ thể (vân tay/NFC/mật khẩu đã đăng ký) — mức 60+.
-        // Mỗi credential (typeValue) → 1 automation "unlock_someone_<cách>[PD.lockUID=tv] → SetBrightness".
+        // (3) PER-NGƯỜI: mở từ NGOÀI bởi người cụ thể (vân tay/NFC/mật khẩu) — mức 60+.
         const creds = await cloud.getLockCredentials(lock.did).catch(() => [] as any[]);
         const seenTv = new Set<string>();
         const credList = creds
@@ -199,42 +206,78 @@ export async function runMatterSetup(
           if (credLevel > 99) break;
           const map = CRED_TYPE_TRIGGER[Number(c.type)];
           const trig = lockTriggers.find((t) => t.triggerDefinitionId === map.td);
-          if (!trig) { credLevel++; continue; }
+          if (!trig) {
+            credLevel++;
+            continue;
+          }
           const person = c.typeGroupName || c.typeName || "?";
           const detail = c.typeName && c.typeName !== person ? ` (${c.typeName})` : "";
           const label = `${map.method} — ${person}${detail}`;
           const tv = String(c.typeValue);
           const name = `[addon] ${lock.name}: ${label} → mức ${credLevel}`;
-          let lid = existing.get(name);
-          if (!lid) {
-            lid = await cloud.createAutomation({
+          desired.push({
+            name,
+            config: {
               homePositionId: hub.homePositionId,
               name,
               iconInfo: `${lock.model}|${light.model}#matter_device_icon_11`,
               trigger: {
-                subjectId: lock.did, subjectModel: lock.model, subjectName: lock.name, roomPositionId: lock.roomPositionId,
-                triggerDefinitionId: map.td, triggerName: label, group: trig.group,
+                subjectId: lock.did,
+                subjectModel: lock.model,
+                subjectName: lock.name,
+                roomPositionId: lock.roomPositionId,
+                triggerDefinitionId: map.td,
+                triggerName: label,
+                group: trig.group,
                 params: [{ ...(trig.params?.[0] ?? {}), value: tv, originValue: tv }],
               },
               action: {
-                subjectId: light.aqaraDid, subjectModel: light.model, subjectName: light.lockName, roomPositionId: light.roomPositionId,
-                actionDefinitionId: setBright.actionDefinitionId, actionName: setBright.actionName, rids: setBright.rids,
-                endpointId: "2", group: setBright.group, param: setBright.params?.[0], value: String(credLevel),
+                subjectId: light.aqaraDid,
+                subjectModel: light.model,
+                subjectName: light.lockName,
+                roomPositionId: light.roomPositionId,
+                actionDefinitionId: setBright.actionDefinitionId,
+                actionName: setBright.actionName,
+                rids: setBright.rids,
+                endpointId: "2",
+                group: setBright.group,
+                param: setBright.params?.[0],
+                value: String(credLevel),
               },
-            });
-            if (lid) r.automationsCreated++;
-          }
-          if (lid) {
-            r.levelMap.push({ level: credLevel, triggerName: label, linkageId: lid });
-            cfgCredLevels.push({ level: credLevel, label, state: "unlocked-out", typeValue: tv });
-          }
+            },
+          });
+          r.levelMap.push({ level: credLevel, triggerName: label, linkageId: "" });
+          cfgCredLevels.push({ level: credLevel, label, state: "unlocked-out", typeValue: tv });
           credLevel++;
         }
         r.done = true;
       } catch (e: any) {
         r.error = e?.message?.slice(0, 220) || "lỗi setup light bridge";
       }
+      hubResults.push(r);
       results.push(r);
+    }
+
+    // ── PHA 2: RECONCILE — so desired vs existing ([addon]) ──
+    const desiredNames = new Set(desired.map((d) => d.name));
+    const existingNames = new Set(existing.map((e) => e.name));
+    const stale = existing.filter((e) => !desiredNames.has(e.name)); // rác / scheme cũ
+    const missing = desired.filter((d) => !existingNames.has(d.name)); // thiếu
+    const dup = existing.length !== existingNames.size; // trùng tên
+    // CHỈ reconcile khi đã build được desired (tránh xoá nhầm khi setup lỗi giữa chừng).
+    if (desired.length && (stale.length || missing.length || dup)) {
+      if (existing.length) await cloud.deleteLinkages(existing.map((e) => e.linkageId)).catch(() => {});
+      let created = 0;
+      for (const d of desired) {
+        const id = await cloud.createAutomation(d.config).catch(() => "");
+        if (id) created++;
+      }
+      console.log(
+        `[matterSetup] reconcile: xoá ${existing.length} ([addon] cũ, rác=${stale.length}), tạo lại ${created}/${desired.length} đúng bộ`,
+      );
+      for (const r of hubResults) r.automationsCreated = created;
+    } else {
+      console.log(`[matterSetup] automation đã ĐÚNG (${existing.length} cái khớp) — bỏ qua, không đụng.`);
     }
   }
 
