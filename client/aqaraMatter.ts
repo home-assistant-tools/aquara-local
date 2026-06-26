@@ -362,6 +362,7 @@ export class AqaraMatterCloud {
       subjectId: string; subjectModel: string; subjectName?: string; roomPositionId: string;
       actionDefinitionId: string; actionName: string; rids: string[];
       endpointId?: string; value?: string; param?: any; group?: string;
+      delaySeconds?: number; // hoãn action N giây (để mức-sáng per-người set SAU → thắng trigger generic)
     };
   }): Promise<string> {
     const t = args.trigger, ac = args.action;
@@ -382,7 +383,7 @@ export class AqaraMatterCloud {
     };
     const thenItem = {
       actionDefinitionId: ac.actionDefinitionId, actionName: ac.actionName, appFilterRule: 2, appIdAssignType: 0,
-      beginTimeBand: "", cateoryValue: [], conditionId: "", definitionIcon: null, delayTime: "0", delayTimeUnit: "0",
+      beginTimeBand: "", cateoryValue: [], conditionId: "", definitionIcon: null, delayTime: String(ac.delaySeconds ?? 0), delayTimeUnit: ac.delaySeconds ? "1" : "0",
       delayType: "0", durationTime: "", endTimeBand: "", endpointId: ac.endpointId ?? "", endpointName: "", eventType: 0,
       fenceDataList: "", filterMonostable: 0, group: ac.group ?? "", groupId: "", groupName: "", groupSort: "999",
       iconId: "", iconInfo: "", isGeoCurrentClientLocalInRange: false, isGeoNeedToShowActiveInfo: false, isMatchedDevice: false,

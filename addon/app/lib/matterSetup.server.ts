@@ -243,6 +243,7 @@ export async function runMatterSetup(
                 group: setBright.group,
                 param: setBright.params?.[0],
                 value: String(credLevel),
+                delaySeconds: 2, // set mức per-người SAU ~2s → thắng các trigger generic (ch49…) bắn cùng lúc
               },
             },
           });
