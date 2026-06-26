@@ -405,6 +405,14 @@ export function unlockDirectionFromLevel(level: number): "in" | "out" | null {
   return null;
 }
 
+/** currentLevel → đổi Chế độ Vắng nhà (realtime từ bridge): true (vừa BẬT) / false (vừa TẮT) / null. */
+export function awayModeFromLevel(level: number): boolean | null {
+  const td = LEVEL_INDEX.get(level)?.td;
+  if (td === "TD.ch54_value1") return true; // Bật chế độ vắng nhà
+  if (td === "TD.ch54_value0") return false; // Tắt chế độ vắng nhà
+  return null;
+}
+
 export async function closeAllLightBridges(): Promise<void> {
   const settled = await Promise.allSettled(handles.values());
   handles.clear();

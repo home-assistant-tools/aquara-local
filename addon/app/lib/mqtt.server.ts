@@ -9,6 +9,7 @@ import {
   onBridgeLevelChange,
   lockStateFromLevel,
   unlockDirectionFromLevel,
+  awayModeFromLevel,
   decodeLevel,
   allEventLabels,
   type BridgeLock,
@@ -42,6 +43,8 @@ const stateTopic = (u: string) => `${BASE}/${u}/state`;
 const cmdTopic = (u: string) => `${BASE}/${u}/set`;
 const battTopic = (u: string) => `${BASE}/${u}/battery`;
 const eventTopic = (u: string) => `${BASE}/${u}/event`;
+const awayStateTopic = (u: string) => `${BASE}/${u}/away`;
+const awayCmdTopic = (u: string) => `${BASE}/${u}/away/set`;
 const availTopic = (u: string) => `${BASE}/${u}/availability`;
 
 function deviceBlock(u: string, name: string) {
@@ -70,6 +73,11 @@ function publishDiscovery(u: string, name: string) {
     name: "Sự kiện gần nhất", has_entity_name: true, unique_id: `${BASE}_${u}_event`,
     state_topic: eventTopic(u), icon: "mdi:door",
     device_class: "enum", options: [OUTSIDE_GENERIC, ...allEventLabels()], // generic "Mở từ bên ngoài" + per-người
+  });
+  cfg("switch", "away", {
+    name: "Chế độ vắng nhà", has_entity_name: true, unique_id: `${BASE}_${u}_away`,
+    state_topic: awayStateTopic(u), command_topic: awayCmdTopic(u),
+    payload_on: "ON", payload_off: "OFF", state_on: "ON", state_off: "OFF", icon: "mdi:shield-home",
   });
 }
 
@@ -134,16 +142,37 @@ export async function startMqttBridge(locks: BridgeLock[]): Promise<void> {
       publishDiscovery(u, l.name || "Khóa D100");
       client!.publish(availTopic(u), "online", { retain: true }); // addon còn sống = available
       client!.subscribe(cmdTopic(u));
+      client!.subscribe(awayCmdTopic(u));
     }
   });
 
   client.on("message", async (topic, payload) => {
+    const cmd = payload.toString().trim().toUpperCase();
+    // CHẾ ĐỘ VẮNG NHÀ: ${BASE}/<u>/away/set (kiểm TRƯỚC vì cũng khớp regex /set$ ở dưới).
+    const ma = topic.match(new RegExp(`^${BASE}/(.+)/away/set$`));
+    if (ma) {
+      const lk = byUid.get(ma[1]);
+      const cloud = getCloud();
+      if (!lk) return;
+      if (!cloud) {
+        console.log(`[mqtt] away ${lk.did} BỎ QUA — offline (cần cloud để ghi)`);
+        return;
+      }
+      try {
+        const on = cmd === "ON";
+        await cloud.setAwayMode(lk.did, on);
+        client!.publish(awayStateTopic(ma[1]), on ? "ON" : "OFF", { retain: true }); // optimistic
+        console.log(`[mqtt] away ${lk.did} → ${on ? "BẬT" : "TẮT"}`);
+      } catch (e: any) {
+        console.log(`[mqtt] away ${lk.did} lỗi: ${e?.message ?? e}`);
+      }
+      return;
+    }
     const m = topic.match(new RegExp(`^${BASE}/(.+)/set$`));
     if (!m) return;
     const lock = byUid.get(m[1]);
     if (!lock) return;
     const u = m[1];
-    const cmd = payload.toString().trim().toUpperCase();
     try {
       if (cmd === "UNLOCK") {
         selfActionUntil.set(u, Date.now() + SELF_ACTION_MS);
@@ -198,6 +227,8 @@ export async function startMqttBridge(locks: BridgeLock[]): Promise<void> {
         client.publish(eventTopic(u), ev, EVENT_PUB); // mở từ trong / sự kiện khác: emit ngay
       }
     }
+    const away = awayModeFromLevel(level); // ch54 on/off → switch "Chế độ vắng nhà" (realtime)
+    if (away !== null) client.publish(awayStateTopic(u), away ? "ON" : "OFF", { retain: true });
   });
 
   // Cloud poll (CHỈ khi online): pin + state-fallback. Mất mạng → bỏ qua, không sập.
@@ -212,6 +243,8 @@ export async function startMqttBridge(locks: BridgeLock[]): Promise<void> {
         // CLOUD LÀ NGUỒN ĐÚNG cho trạng thái khóa (D100 auto-lock; bridge hay bỏ lỡ sự kiện khóa lại) → luôn đồng bộ.
         const cs = sig.lock_state === "2" || sig.lock_state === "4" ? "LOCKED" : sig.lock_state === "1" || sig.lock_state === "3" ? "UNLOCKED" : null;
         if (cs) applyLockState(u, cs);
+        const away = await cloud.getAwayMode(l.did); // đồng bộ Chế độ Vắng nhà từ cloud
+        if (away !== null) client.publish(awayStateTopic(u), away ? "ON" : "OFF", { retain: true });
       } catch {
         /* offline / lỗi cloud → bỏ qua nhịp này */
       }

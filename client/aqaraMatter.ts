@@ -445,6 +445,20 @@ export class AqaraMatterCloud {
     return out;
   }
 
+  /** Đọc Chế độ Vắng nhà (resource 13.54.85): true=bật, false=tắt. */
+  async getAwayMode(lockDid: string): Promise<boolean | null> {
+    const res = await this.cloud
+      .post<any[]>("/res/query/by/resourceId", { data: [{ options: ["13.54.85"], subjectId: lockDid }] })
+      .catch(() => [] as any[]);
+    const v = (Array.isArray(res) ? res : []).find((r) => r?.resourceId === "13.54.85")?.value;
+    return v == null ? null : v === "1";
+  }
+
+  /** Bật/tắt Chế độ Vắng nhà (POST /res/write resource 13.54.85 = "1"/"0"). */
+  async setAwayMode(lockDid: string, on: boolean): Promise<void> {
+    await this.cloud.post("/res/write", { data: { "13.54.85": on ? "1" : "0" }, subjectId: lockDid });
+  }
+
   /** GET /dev/lock/query → user/credential (vân tay/mật khẩu/NFC/face). types 1..7. */
   async getLockCredentials(lockDid: string, types = "[1,2,3,4,5,6,7]"): Promise<any[]> {
     const res = await this.cloud.get<any>("/dev/lock/query", { deviceId: lockDid, types });
